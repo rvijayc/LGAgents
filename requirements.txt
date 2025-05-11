@@ -3,3 +3,4 @@ langchain_community
 langchain[openai]
 IPython
 grandalf
+agentrun
