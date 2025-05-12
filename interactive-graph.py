@@ -1,35 +1,89 @@
+import os
+import logging
+import subprocess
 import IPython, pdb
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, Optional
+
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain.chat_models import init_chat_model
 from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver 
 from langchain_core.tools import tool
-from agentrun import AgentRun
+from langchain.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+import docker
+from docker import DockerClient
 
-# initialize agent runner.
-python_runner = AgentRun(
-        container_name="code_runner-python_runner-1",
-        cached_dependencies = ["requests", "matplotlib"]
-        )
+from external.AgentRun.agentrun import AgentRun
+
+import docker
+import subprocess
+import os
+
+class ConfigSchema(TypedDict):
+    first_time: bool
+    python_runner: Optional[AgentRun]
+
+class PythonRunnerTool:
+
+    def __init__(self):
+        self.log = logging.getLogger('PYTHON_RUNNER')
+        self.client: DockerClient = docker.from_env()
+        script_path = os.path.dirname(os.path.abspath(__file__))
+        self.code_runner_path = os.path.join(script_path, 'code_runner')
+        self.tool_node: Optional[ToolNode] = None
+
+    def __enter__(self):
+        self.log.info('Starting Python Runner Docker Image ...')
+        subprocess.run(
+                ['docker', 'compose', 'up', '--build', '-d'], 
+                cwd=self.code_runner_path,
+                check=True
+                )
+        # initialize the agent runner.
+        self.container = self.client.containers.get('code_runner-python_runner-1')
+        self.python_runner = AgentRun(
+                container_name="code_runner-python_runner-1",
+                cached_dependencies = []
+                )
+        return self
+
+    def execute_code(self, code: str):
+        return self.python_runner.execute_code_in_container(code)
+
+    def configure(self, config: RunnableConfig):
+        config['configurable']['python_runner'] = self.python_runner
+
+    def create_tool_node(self) -> ToolNode:
+        if not self.tool_node:
+            self.tool_node = ToolNode([run_python_tool], name="run_python")
+        return self.tool_node
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.log.info('Stopping Python Runner Docker Image ...')
+        subprocess.run(
+                ['docker', 'compose', 'down'],
+                cwd=self.code_runner_path,
+                check=True
+                )
 
 # create a tool.
 @tool("run_python_tool", parse_docstring=True)
-def run_python_tool(python_code: str) -> str:
+def run_python_tool(python_code: str, config: RunnableConfig) -> str:
     """Runs the specified python code provided and returns the standard output.
 
     Args:
         python_code: Python code to run provided as a string.
     """
+    python_runner = config['configurable'].get('python_runner')
+    if not python_runner:
+        raise RuntimeError('Python runner is not configured by the runtime configuration!')
     return python_runner.execute_code_in_container(python_code)
-
-# create a tool node corresponding to the above tool.
-python_tool_node = ToolNode([run_python_tool], name="run_python")
 
 # load database.
 db = SQLDatabase.from_uri("sqlite:///Chinook.db")
@@ -88,7 +142,9 @@ query to at most {top_k} results.
 
 You also have available, a python tool ("run_python_tool") that can execute
 python code and return the standard output. You can use this for any
-computation and transformation of the results.
+computation and transformation of the results. It doesn't have any display
+capabilities, and hence, any plots generated must be saved to a local file and
+the user notified of the file location.
 
 You can order the results by a relevant column to return the most interesting
 examples in the database. Never query for all the columns from a specific table,
@@ -135,7 +191,7 @@ You will call the appropriate tool to execute the query after running this check
 def check_query(state: MessagesState):
     system_message = {
         "role": "system",
-        "content": generate_query_system_prompt,
+        "content": check_query_system_prompt,
     }
 
     # Generate an artificial user message to check
@@ -147,12 +203,28 @@ def check_query(state: MessagesState):
 
     return {"messages": [response]}
 
+class PythonToolOutputSummary(BaseModel):
+    text: str = Field(description="Any text output to the user.")
+    plot_path: Optional[str] = Field(description="If the python tool run produced a path, specify the path of the plot.")
+
+def process_python_tool_output(state: MessagesState):
+    """
+    Allow the LLM to process the output of the python tool and return a structured response.
+    """
+    parser = PydanticOutputParser(pydantic_object=PythonToolOutputSummary)
+    system_msg = SystemMessage(f"""
+    Process the output of the previous python tool run and generate a response using this schema: {parser.get_format_instructions()}
+    """)
+    response = llm.invoke([system_msg] + state['messages'])
+    assert isinstance(response.content, str)
+    parsed = parser.parse(response.content)
+    return {"messages": [response]}
+
 def route_tool(state: MessagesState) -> Literal[END, "check_query", "run_python"]:
     messages = state["messages"]
     last_message = messages[-1]
     assert isinstance(last_message, AIMessage)
     tool_calls = last_message.tool_calls
-    pdb.set_trace()
     if len(tool_calls) == 0:
         return END
     elif len(tool_calls) > 1:
@@ -172,53 +244,55 @@ def should_get_table_meta(state: MessagesState, config: RunnableConfig) -> Liter
     else:
         return 'generate_query'
 
-class ConfigSchema(TypedDict):
-    first_time: bool
+with PythonRunnerTool() as python_tool:
+    builder = StateGraph(MessagesState, config_schema=ConfigSchema)
+    builder.add_node(list_tables)
+    builder.add_node(call_get_schema)
+    builder.add_node(get_schema_node)
+    builder.add_node(generate_query)
+    builder.add_node(check_query)
+    builder.add_node(run_query_node)
+    builder.add_node(python_tool.create_tool_node())
+    builder.add_node(process_python_tool_output)
 
-builder = StateGraph(MessagesState, config_schema=ConfigSchema)
-builder.add_node(list_tables)
-builder.add_node(call_get_schema)
-builder.add_node(get_schema_node, "get_schema")
-builder.add_node(generate_query)
-builder.add_node(check_query)
-builder.add_node(run_query_node, "run_query")
-builder.add_node(python_tool_node, "run_python")
+    builder.add_conditional_edges(START, should_get_table_meta)
+    builder.add_edge("list_tables", "call_get_schema")
+    builder.add_edge("call_get_schema", "get_schema")
+    builder.add_edge("get_schema", "generate_query")
+    builder.add_conditional_edges(
+        "generate_query",
+        route_tool,
+    )
+    builder.add_edge("check_query", "run_query")
+    builder.add_edge("run_query", "generate_query")
+    builder.add_edge("run_python", "process_python_tool_output")
+    builder.add_edge("process_python_tool_output", "generate_query")
 
-builder.add_conditional_edges(START, should_get_table_meta)
-builder.add_edge("list_tables", "call_get_schema")
-builder.add_edge("call_get_schema", "get_schema")
-builder.add_edge("get_schema", "generate_query")
-builder.add_conditional_edges(
-    "generate_query",
-    route_tool,
-)
-builder.add_edge("check_query", "run_query")
-builder.add_edge("run_query", "generate_query")
-builder.add_edge("run_python", "generate_query")
+    memory = MemorySaver()
+    agent = builder.compile(checkpointer=memory)
 
-memory = MemorySaver()
-agent = builder.compile(checkpointer=memory)
+    # print the graph.
+    agent.get_graph().print_ascii()
 
-# print the graph.
-agent.get_graph().print_ascii()
+    # initial runtime configuration.
+    config = { 
+              "configurable": {
+              "thread_id": "1",
+              "first_time": True  # initialize first time to false.
+              }
+    }
+    # add the python runner runtime configuration to be passed to the tool.
+    python_tool.configure(config)
 
-# initial runtime configuration.
-config = { 
-          "configurable": {
-          "thread_id": "1",
-          "first_time": True  # initialize first time to false.
-          }
-}
+    def ask(question:str="Which sales agent made the most in sales in 2009?"):
+        for step in agent.stream(
+            {"messages": [{"role": "user", "content": question}]},
+            stream_mode="values",
+            config=config
+        ):
+            step["messages"][-1].pretty_print()
 
-def ask(question:str="Which sales agent made the most in sales in 2009?"):
-    for step in agent.stream(
-        {"messages": [{"role": "user", "content": question}]},
-        stream_mode="values",
-        config=config
-    ):
-        step["messages"][-1].pretty_print()
+        # don't run steps needed only the first time.
+        config['configurable']['first_time'] = False
 
-    # don't run steps needed only the first time.
-    config['configurable']['first_time'] = False
-
-IPython.embed()
+    IPython.embed()

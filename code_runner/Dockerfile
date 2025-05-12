@@ -12,8 +12,8 @@ RUN useradd --create-home pythonuser
 USER pythonuser
 WORKDIR /code
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/home/pythonuser/.local/bin:${PATH}"
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Optional: Only if you have specific dependencies
 # COPY --chown=appuser:appuser requirements.txt .
