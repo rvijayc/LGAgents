@@ -9,6 +9,27 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver 
+from langchain_core.tools import tool
+from agentrun import AgentRun
+
+# initialize agent runner.
+python_runner = AgentRun(
+        container_name="code_runner-python_runner-1",
+        cached_dependencies = ["requests", "matplotlib"]
+        )
+
+# create a tool.
+@tool("run_python_tool", parse_docstring=True)
+def run_python_tool(python_code: str) -> str:
+    """Runs the specified python code provided and returns the standard output.
+
+    Args:
+        python_code: Python code to run provided as a string.
+    """
+    return python_runner.execute_code_in_container(python_code)
+
+# create a tool node corresponding to the above tool.
+python_tool_node = ToolNode([run_python_tool], name="run_python")
 
 # load database.
 db = SQLDatabase.from_uri("sqlite:///Chinook.db")
@@ -65,6 +86,10 @@ then look at the results of the query and return the answer. Unless the user
 specifies a specific number of examples they wish to obtain, always limit your
 query to at most {top_k} results.
 
+You also have available, a python tool ("run_python_tool") that can execute
+python code and return the standard output. You can use this for any
+computation and transformation of the results.
+
 You can order the results by a relevant column to return the most interesting
 examples in the database. Never query for all the columns from a specific table,
 only ask for the relevant columns given the question.
@@ -83,7 +108,7 @@ def generate_query(state: MessagesState):
     }
     # We do not force a tool call here, to allow the model to
     # respond naturally when it obtains the solution.
-    llm_with_tools = llm.bind_tools([run_query_tool])
+    llm_with_tools = llm.bind_tools([run_query_tool, run_python_tool])
     response = llm_with_tools.invoke([system_message] + state["messages"])
 
     return {"messages": [response]}
@@ -122,13 +147,24 @@ def check_query(state: MessagesState):
 
     return {"messages": [response]}
 
-def should_continue(state: MessagesState) -> Literal[END, "check_query"]:
+def route_tool(state: MessagesState) -> Literal[END, "check_query", "run_python"]:
     messages = state["messages"]
     last_message = messages[-1]
-    if not last_message.tool_calls:
+    assert isinstance(last_message, AIMessage)
+    tool_calls = last_message.tool_calls
+    pdb.set_trace()
+    if len(tool_calls) == 0:
         return END
+    elif len(tool_calls) > 1:
+        calls = [ t['name'] for t in tool_calls ]
+        raise NotImplementedError(f'Not handling multiple tool calls {calls}')
+    elif tool_calls[0]['name'] == 'sql_db_query':
+        return 'check_query'
+    elif tool_calls[0]['name'] == 'run_python_tool':
+        return 'run_python'
     else:
-        return "check_query"
+        # should not be here.
+        assert False
 
 def should_get_table_meta(state: MessagesState, config: RunnableConfig) -> Literal["generate_query", "list_tables"]:
     if config['configurable']['first_time']: # type: ignore
@@ -146,6 +182,7 @@ builder.add_node(get_schema_node, "get_schema")
 builder.add_node(generate_query)
 builder.add_node(check_query)
 builder.add_node(run_query_node, "run_query")
+builder.add_node(python_tool_node, "run_python")
 
 builder.add_conditional_edges(START, should_get_table_meta)
 builder.add_edge("list_tables", "call_get_schema")
@@ -153,10 +190,11 @@ builder.add_edge("call_get_schema", "get_schema")
 builder.add_edge("get_schema", "generate_query")
 builder.add_conditional_edges(
     "generate_query",
-    should_continue,
+    route_tool,
 )
 builder.add_edge("check_query", "run_query")
 builder.add_edge("run_query", "generate_query")
+builder.add_edge("run_python", "generate_query")
 
 memory = MemorySaver()
 agent = builder.compile(checkpointer=memory)

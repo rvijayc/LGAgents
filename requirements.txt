@@ -4,3 +4,5 @@ langchain[openai]
 IPython
 grandalf
 agentrun
+pygraphviz
+matplotlib

@@ -1,0 +1,15 @@
+services:
+  python_runner:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    volumes:
+      - code_execution_volume:/code
+    command: ["tail", "-f", "/dev/null"] 
+    pids_limit: 10
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - OPENBLAS_NUM_THREADS=1 # this specifically for a numpy bug. See: https://github.com/Jonathan-Adly/AgentRun/issues/7#issue-2306842471
+volumes:
+  code_execution_volume:
