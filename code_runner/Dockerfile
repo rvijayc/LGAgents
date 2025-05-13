@@ -11,6 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN useradd --create-home pythonuser
 USER pythonuser
 WORKDIR /code
+RUN mkdir -p /code/artifacts && ls -l /code/artifacts
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
