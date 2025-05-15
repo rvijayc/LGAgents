@@ -9,7 +9,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.checkpoint.memory import MemorySaver 
 from langchain_core.runnables.graph_png import PngDrawer
 
-from python_toolkit import PythonRunnerTool, run_python_tool
+from python_toolkit import PythonRunnerTool
 from sql_toolkit import SQLDatabaseTool, list_tables, call_get_schema, check_query
 from utils import show_image
 
@@ -33,21 +33,23 @@ DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the databa
 def react_node(state: MessagesState, config: RunnableConfig):
 
     # generate a system message.
-    sql_toolkit = config['configurable']['sql_toolkit']
+    cfg = config['configurable'] # pyright: ignore[reportTypedDictNotRequiredAccess]
+    sql_toolkit = cfg['sql_toolkit']
     system_message = SystemMessage(react_system_prompt.format(
         dialect=sql_toolkit.dialect,
         top_k=5
     ))
+    python_toolkit = cfg['python_runner']
 
     # We do not force a tool call here, to allow the model to
     # respond naturally when it obtains the solution.
     run_query_tool = sql_toolkit.run_query_tool
-    llm_with_tools = sql_toolkit.llm.bind_tools([run_query_tool, run_python_tool])
+    llm_with_tools = sql_toolkit.llm.bind_tools([run_query_tool, python_toolkit.tool()])
     response = llm_with_tools.invoke([system_message] + state["messages"])
 
     return {"messages": [response]}
 
-def route_tool(state: MessagesState) -> Literal[END, "check_query", "run_python"]:
+def route_tool(state: MessagesState) -> Literal[END, "check_query", "run_python"]:  # pyright: ignore[reportInvalidTypeForm]
     messages = state["messages"]
     last_message = messages[-1]
     assert isinstance(last_message, AIMessage)
@@ -100,7 +102,7 @@ class SQLAgent:
         builder.add_node(react_node)
         builder.add_node(check_query)
         builder.add_node(self.sql_tool.run_query_tool_node)
-        builder.add_node(self.python_tool.runner_tool_node())
+        builder.add_node(self.python_tool.tool_node())
 
         builder.add_conditional_edges(START, should_get_table_meta)
         builder.add_edge("list_tables", "call_get_schema")
@@ -139,7 +141,7 @@ class SQLAgent:
                 }
         }
 
-    def ask(self, question:str, debug=False):
+    def chat(self, question:str, debug=False):
 
         if debug:
             for step in self.agent.stream(
