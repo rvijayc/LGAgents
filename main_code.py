@@ -1,33 +1,45 @@
+import os
+import urllib.request
 import IPython
 
 from python_toolkit import PythonRunnerTool
-from sql_code_agent import SQLCodeAgent
+from sql_code_agent import SQLAgent, SQLiteAgentPolicy
 
-# this is the code that loads and exposes the database as a module to the LLM.
-# The docker image must come preinstalled with any dependencies needed for
-# this.
-DATABASE_LOADER="""
-import os
-from sqlalchemy import create_engine
-script_dir = os.path.dirname(os.path.abspath(__file__))
-db = os.path.join(script_dir, 'Chinook.db')
-engine = create_engine(f"sqlite:///{db}")
-__all__ = [ 'engine' ]
-"""
 # ignore any pre-installed dependencies needed by the above code.
 IGNORE_DEPDENCIES=['src']
 # ignore any unsafe functions (SQLAlchemy has a function called "compile").
 IGNORE_UNSAFE_FUNCTIONS=['compile']
 
+CHINOOK_DATABASE_HINTS="""
+Here are some additional hints about tables and columns the database.
+
+Table InvoiceLine:
+    - Column UnitPrice is in US dollar units.
+
+"""
+
+class ChinookSQLitePolicy(SQLiteAgentPolicy):
+
+    def __init__(self):
+        db_file = 'Chinook_Sqlite.sqlite'
+        if not os.path.isfile(db_file):
+            print(f'Downloading {db_file} ...')            
+            url = f'https://github.com/lerocha/chinook-database/releases/download/v1.4.5/{db_file}'
+            urllib.request.urlretrieve(url, db_file)
+        super().__init__(db_file)
+
+    def database_hints(self):
+        return CHINOOK_DATABASE_HINTS
+
 def main():
     
     with PythonRunnerTool(
             ignore_dependencies=IGNORE_DEPDENCIES,
-            ignore_unsafe_functions=IGNORE_UNSAFE_FUNCTIONS
+            ignore_unsafe_functions=IGNORE_UNSAFE_FUNCTIONS,
+            debug=True
     ) as python_tool:
-        python_tool.copy_file_to_container('Chinook.db', '/code/src')
-        python_tool.copy_code_to_container(DATABASE_LOADER, '/code/src/database.py')
-        agent = SQLCodeAgent(python_tool)
+        policy = ChinookSQLitePolicy()
+        agent = SQLAgent(policy, python_tool)
         IPython.embed()
 
 if __name__ == "__main__":
