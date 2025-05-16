@@ -3,6 +3,7 @@ services:
     build:
       context: ./
       dockerfile: Dockerfile
+    container_name: python_runner
     volumes:
       - code_execution_volume:/code
     pids_limit: 10

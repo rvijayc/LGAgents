@@ -1,10 +1,10 @@
+import sys
 import pdb
 import subprocess
 import os
 import logging
 import tempfile, tarfile
 from typing import Optional, List
-from uuid import uuid4
 from io import BytesIO
 
 import docker
@@ -12,10 +12,12 @@ from docker import DockerClient
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool, StructuredTool
+from langchain_core.tools import StructuredTool
 from langchain.output_parsers import PydanticOutputParser
+import yaml
 
 from external.AgentRun.agentrun import AgentRun, UVInstallPolicy
+from loguru import logger
 
 class PythonToolInput(BaseModel):
     python_code: str = Field(description=" Python code to run provided as a string.")
@@ -57,24 +59,74 @@ The tool output follows this schema:
 """
 # create a tool.
 def run_python_tool_func(python_code: str, artifacts_abs_paths: List[str], config: RunnableConfig) -> PythonToolOutput:
-    python_tool: "PythonRunnerTool" = config['configurable']['python_runner']
+    cfg = config['configurable'] # pyright: ignore[reportTypedDictNotRequiredAccess]
+    python_tool: "PythonRunnerTool" = cfg['python_runner']
     output = python_tool.execute_code(python_code)
     local_files = []
     for cont_path in artifacts_abs_paths:
         try:
             # copy the file locally
             local_files.append(python_tool.copy_file_from_container(cont_path))
-        except docker.errors.NotFound as e:
+        except docker.errors.NotFound:
             raise RuntimeError(f"{cont_path} is inaccessible. The program may have failed - here's the output:\n {output}")
     return PythonToolOutput(
             stdout=output,
             user_artifacts_abs_paths=local_files
     )
 
+class DockerCompose:
+
+    def __init__(self, docker_compose_yml:Optional[str]=None):
+
+        if not docker_compose_yml:
+            docker_compose_yml = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "code_runner", 
+                    "docker-compose.yml"
+                    )
+        with open(docker_compose_yml, 'rt') as f:
+            self.docker_yml = yaml.load(f, Loader=yaml.Loader)
+        self.code_runner_path = os.path.dirname(docker_compose_yml)
+        self.log = logger.bind(name="Docker")
+        self.log.remove()
+        self.log.add(
+                sys.stderr,
+                format="{time} {level} {message}",
+                level="INFO",
+                enqueue=True
+        )
+
+    def __enter__(self):
+        self.log.info('Starting Docker Container ...')
+        subprocess.run(
+                ['docker', 'compose', 'up', '--build', '-d'], 
+                cwd=self.code_runner_path,
+                check=True
+                )
+        return self
+
+    def get_container_name(self, service_name: str):
+        return self.docker_yml['services'][service_name]['container_name']
+
+    def get_requirements_txt(self):
+        reqs_file = os.path.join(self.code_runner_path, 'requirements.txt')
+        assert os.path.isfile(reqs_file)
+        return reqs_file
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.log.info('Stopping Python Container ...')
+        subprocess.run(
+                ['docker', 'compose', 'down'],
+                cwd=self.code_runner_path,
+                check=True
+                )
+
+
 class PythonRunnerTool:
 
     def __init__(self, 
-                 docker_root: Optional[str]=None,
+                 docker_compose: DockerCompose,
+                 tmpdir: str, 
                  ignore_dependencies: Optional[List[str]]=None,
                  ignore_unsafe_functions: Optional[List[str]]=None,
                  debug=False
@@ -83,41 +135,31 @@ class PythonRunnerTool:
         Initialize the PythonRunnerTool.
 
         Args:
-            docker_root: Specify the path that contains the docker config files
-                (docker_compose.yml).
+            docker_compose: A DockerCompose instance that starts the docker
+                image using a context manager.
+            tempdir: A temporary folder to store temporary files (to be deleted
+                on program exit). Use the tempfile.TemporaryDirectory context
+                manager for this.
         """
         self.debug = debug
         self.log = logging.getLogger('PYTHON_RUNNER')
         self.client: DockerClient = docker.from_env()
-        if not docker_root:
-            script_path = os.path.dirname(os.path.abspath(__file__))
-            self.code_runner_path = os.path.join(script_path, 'code_runner')
-        else:
-            self.code_runner_path = docker_root
         self.ignore_dependencies = ignore_dependencies
         self.ignore_unsafe_functions = ignore_unsafe_functions
         self._tool_node: Optional[ToolNode] = None
         self._tool: Optional[StructuredTool] = None
-
-    def __enter__(self):
-        self.log.info('Starting Python Runner Docker Image ...')
-        subprocess.run(
-                ['docker', 'compose', 'up', '--build', '-d'], 
-                cwd=self.code_runner_path,
-                check=True
-                )
-        # initialize the agent runner.
-        self.container = self.client.containers.get('code_runner-python_runner-1')
+        self.docker_compose = docker_compose
+        container_name = self.docker_compose.get_container_name("python_runner")
+        self.container = self.client.containers.get(container_name)
         self.python_runner = AgentRun(
-                container_name="code_runner-python_runner-1",
+                container_name=container_name,
                 cached_dependencies = ['sqlalchemy'],
                 install_policy=UVInstallPolicy(),
                 cpu_quota=100000,
                 default_timeout=100,
                 log_level = 'INFO' if self.debug is True else 'WARNING',
                 )
-        self.tmpdir = tempfile.TemporaryDirectory()
-        return self
+        self.tmpdir = tmpdir
 
     def execute_code(self, code: str):
         return self.python_runner.execute_code_in_container(
@@ -127,13 +169,13 @@ class PythonRunnerTool:
         )
 
     def configure(self, config: RunnableConfig):
-        config['configurable']['python_runner'] = self
+        config['configurable']['python_runner'] = self  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
     def get_requirements_txt(
             self,
             fmt="markdown"
     ) -> str:
-        requirements_txt = os.path.join(self.code_runner_path, 'requirements.txt')
+        requirements_txt = self.docker_compose.get_requirements_txt()
         lines: List[str] = []
         with open(requirements_txt, 'rt') as f:
             lines = f.readlines()
@@ -157,7 +199,7 @@ class PythonRunnerTool:
         script_path, script_name = os.path.split(dst_path)
 
         # write the python code to a temporary file.
-        temp_script_path = os.path.join(self.tmpdir.name, script_name)
+        temp_script_path = os.path.join(self.tmpdir, script_name)
         with open(temp_script_path, "w") as file:
             file.write(python_code)
 
@@ -207,7 +249,7 @@ class PythonRunnerTool:
 
         # use temporary folder itself if destination isn't specified.
         if not dst_folder:
-            dst_folder = os.path.join(self.tmpdir.name)
+            dst_folder = os.path.join(self.tmpdir)
         
         with tempfile.NamedTemporaryFile(delete_on_close=False) as tmpfp:
 
@@ -244,13 +286,4 @@ class PythonRunnerTool:
         if not self._tool_node:
             self._tool_node = ToolNode([self.tool()], name="run_python")
         return self._tool_node
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.log.info('Stopping Python Runner Docker Image ...')
-        subprocess.run(
-                ['docker', 'compose', 'down'],
-                cwd=self.code_runner_path,
-                check=True
-                )
-        self.tmpdir.cleanup()
 

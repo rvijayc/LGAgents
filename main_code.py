@@ -1,14 +1,11 @@
 import os
 import urllib.request
+import tempfile
+
 import IPython
 
-from python_toolkit import PythonRunnerTool
+from python_toolkit import DockerCompose
 from sql_code_agent import SQLAgent, SQLiteAgentPolicy
-
-# ignore any pre-installed dependencies needed by the above code.
-IGNORE_DEPDENCIES=['src']
-# ignore any unsafe functions (SQLAlchemy has a function called "compile").
-IGNORE_UNSAFE_FUNCTIONS=['compile']
 
 CHINOOK_DATABASE_HINTS="""
 Here are some additional hints about tables and columns the database.
@@ -17,7 +14,6 @@ Table InvoiceLine:
     - Column UnitPrice is in US dollar units.
 
 """
-
 class ChinookSQLitePolicy(SQLiteAgentPolicy):
 
     def __init__(self):
@@ -33,13 +29,9 @@ class ChinookSQLitePolicy(SQLiteAgentPolicy):
 
 def main():
     
-    with PythonRunnerTool(
-            ignore_dependencies=IGNORE_DEPDENCIES,
-            ignore_unsafe_functions=IGNORE_UNSAFE_FUNCTIONS,
-            debug=True
-    ) as python_tool:
+    with DockerCompose() as dc, tempfile.TemporaryDirectory() as tempdir:
         policy = ChinookSQLitePolicy()
-        agent = SQLAgent(policy, python_tool)
+        agent = SQLAgent(policy, dc, tempdir)
         IPython.embed()
 
 if __name__ == "__main__":

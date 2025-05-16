@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from langchain.output_parsers import PydanticOutputParser
 from langchain_core.tools import tool, StructuredTool
 
-from python_toolkit import PythonRunnerTool
+from python_toolkit import PythonRunnerTool, DockerCompose
 from utils import show_image
 
 SQLA_LIST_TABLES_PYTHON=r"""
@@ -298,13 +298,29 @@ class SQLAgent:
 
     def __init__(self, 
                  agent_policy:SQLAgentPolicy,
-                 python_tool: PythonRunnerTool, 
+                 docker_compose: DockerCompose,
+                 tmpdir: str,
                  model:str = "openai:gpt-4.1"
     ):
+        """
+        Creates a new SQL Agent.
+
+        Args:
+            agent_policy: App specific customization for the agent.
+            tmpdir: A temporary directory to use for the temporary files
+                created during the agent run (recommend using
+                tempfile.TemporaryDirectory() context manager for this).
+        """
 
         # initialization.
         self.llm = init_chat_model(model)
-        self.python_tool = python_tool
+        # create the python runner.
+        self.python_tool = PythonRunnerTool(
+                docker_compose,
+                tmpdir,
+                ignore_dependencies=['src'],
+                ignore_unsafe_functions=['compile']
+        )
         self.agent_policy: SQLAgentPolicy = agent_policy
 
         # initialize the database configuration.

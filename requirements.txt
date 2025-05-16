@@ -12,3 +12,4 @@ uuid
 loguru
 pytest
 pytest-benchmark
+pyyaml
