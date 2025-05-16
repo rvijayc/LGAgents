@@ -1,11 +1,10 @@
-import os
+import os, sys
 import urllib.request
 import tempfile
 
 import IPython
 
-from python_toolkit import DockerCompose
-from sql_code_agent import SQLAgent, SQLiteAgentPolicy
+from sqlagent import SQLiteAgentPolicy, DockerCompose, SQLAgent
 
 CHINOOK_DATABASE_HINTS="""
 Here are some additional hints about tables and columns the database.

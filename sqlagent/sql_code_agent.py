@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field
 from langchain.output_parsers import PydanticOutputParser
 from langchain_core.tools import tool, StructuredTool
 
-from python_toolkit import PythonRunnerTool, DockerCompose
-from utils import show_image
+from .python_toolkit import PythonRunnerTool, DockerCompose
+from .utils import show_image
 
 SQLA_LIST_TABLES_PYTHON=r"""
 from src.database import engine
