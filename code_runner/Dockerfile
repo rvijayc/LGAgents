@@ -28,5 +28,5 @@ RUN uv venv /code/.venv &&                \
 ENV PATH="/code/.venv/bin:$PATH"
 
 # loop indefinitely.
-CMD tail -f /dev/null
+CMD [ "tail", "-f", "/dev/null"]
 

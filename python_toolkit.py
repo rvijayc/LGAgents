@@ -76,6 +76,7 @@ class PythonRunnerTool:
     def __init__(self, 
                  docker_root: Optional[str]=None,
                  ignore_dependencies: Optional[List[str]]=None,
+                 ignore_unsafe_functions: Optional[List[str]]=None,
                  debug=False
     ):
         """
@@ -94,6 +95,7 @@ class PythonRunnerTool:
         else:
             self.code_runner_path = docker_root
         self.ignore_dependencies = ignore_dependencies
+        self.ignore_unsafe_functions = ignore_unsafe_functions
         self._tool_node: Optional[ToolNode] = None
         self._tool: Optional[StructuredTool] = None
 
@@ -108,18 +110,21 @@ class PythonRunnerTool:
         self.container = self.client.containers.get('code_runner-python_runner-1')
         self.python_runner = AgentRun(
                 container_name="code_runner-python_runner-1",
-                cached_dependencies = [],
+                cached_dependencies = ['sqlalchemy'],
                 install_policy=UVInstallPolicy(),
                 cpu_quota=100000,
                 default_timeout=100,
-                log_level = 'INFO' if self.debug is False else 'DEBUG'
+                log_level = 'INFO' if self.debug is True else 'WARNING',
                 )
         self.tmpdir = tempfile.TemporaryDirectory()
         return self
 
     def execute_code(self, code: str):
         return self.python_runner.execute_code_in_container(
-                code, ignore_dependencies=self.ignore_dependencies)
+                code, 
+                ignore_dependencies=self.ignore_dependencies,
+                ignore_unsafe_functions=self.ignore_unsafe_functions
+        )
 
     def configure(self, config: RunnableConfig):
         config['configurable']['python_runner'] = self

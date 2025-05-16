@@ -10,3 +10,5 @@ RestrictedPython
 IPython
 uuid
 loguru
+pytest
+pytest-benchmark

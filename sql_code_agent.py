@@ -224,11 +224,12 @@ class SQLCodeAgent:
     def _init_config(self):
 
         self.config = {
+                'recursion_limit': 10,
                 'configurable': {
                     'thread_id': 1,
                     'first_time': True,
                     'python_runner': self.python_tool,
-                    'llm': self.llm
+                    'llm': self.llm,
                 }
         }
 

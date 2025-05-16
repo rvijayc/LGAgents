@@ -16,10 +16,15 @@ __all__ = [ 'engine' ]
 """
 # ignore any pre-installed dependencies needed by the above code.
 IGNORE_DEPDENCIES=['src']
+# ignore any unsafe functions (SQLAlchemy has a function called "compile").
+IGNORE_UNSAFE_FUNCTIONS=['compile']
 
 def main():
     
-    with PythonRunnerTool(ignore_dependencies=IGNORE_DEPDENCIES) as python_tool:
+    with PythonRunnerTool(
+            ignore_dependencies=IGNORE_DEPDENCIES,
+            ignore_unsafe_functions=IGNORE_UNSAFE_FUNCTIONS
+    ) as python_tool:
         python_tool.copy_file_to_container('Chinook.db', '/code/src')
         python_tool.copy_code_to_container(DATABASE_LOADER, '/code/src/database.py')
         agent = SQLCodeAgent(python_tool)
