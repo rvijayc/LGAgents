@@ -4,6 +4,7 @@ import tempfile
 from typing import Literal, TypedDict, List, Optional
 from uuid import uuid4
 import abc
+from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
@@ -15,143 +16,10 @@ from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 from langchain.output_parsers import PydanticOutputParser
 from langchain_core.tools import tool, StructuredTool
+from langgraph.types import Command
 
 from .python_toolkit import PythonRunnerTool, DockerCompose
 from .utils import show_image
-
-SQLA_LIST_TABLES_PYTHON=r"""
-from src.database import engine
-from sqlalchemy import MetaData
-
-# Create a metadata object
-metadata = MetaData()
-metadata.reflect(bind=engine)
-
-# Get the table names
-table_names = metadata.tables.keys()
-print('Available tables are:', list(table_names))
-"""
-
-SQLA_GET_SCHEMA_PYTHON=r"""
-from src.database import engine
-from sqlalchemy import MetaData
-from sqlalchemy.schema import CreateTable
-
-# Load metadata
-metadata = MetaData()
-metadata.reflect(bind=engine)
-
-# Generate CREATE TABLE statements
-for table_name, table in metadata.tables.items():
-    create_statement = str(CreateTable(table).compile(engine))
-    print(f"Schema for '{table_name} table':\n{create_statement}\n")
-
-"""
-def _run_python_tool(code: str, config:RunnableConfig):
-    tool_call = {
-        "name": "run_python_tool",
-        "args": {
-            'python_code': code,
-            'artifacts_abs_paths': []
-        },
-        "id": uuid4().hex,
-        "type": "tool_call",
-    }
-    tool_call_message = AIMessage(content="", tool_calls=[tool_call])
-    python_runner = config['configurable']['python_runner'] # type: ignore
-    tool_message = python_runner.tool().invoke(tool_call, config=config)
-    return tool_call_message, tool_message
-
-def list_tables(state: MessagesState, config: RunnableConfig):
-    """
-    Create a pre-determined tool call to list database table entries.
-    """
-    tool_call_message, tool_message = _run_python_tool(SQLA_LIST_TABLES_PYTHON, config)
-    return {"messages": [tool_call_message, tool_message]}
-
-def call_get_schema(state: MessagesState, config: RunnableConfig):
-    """
-    Force the model to query the schema of the SQL database.
-    """
-    tool_call_message, tool_message = _run_python_tool(SQLA_GET_SCHEMA_PYTHON, config)
-    return {"messages": [tool_call_message, tool_message]}
-
-class AnswerSchema(BaseModel):
-    message: str = Field(description="""
-    The answer to the user's question in markdown format. Include links to artifacts as appropriate.
-    """)
-    user_artifacts_abs_paths: List[str] = Field(description="""
-    Local paths of artifacts (if any) produced as a part of the user's answer.
-    """)
-
-react_system_prompt ="""
-You are an agent designed to interact with a SQL database. You'll do so by
-writing and executing python code using a python runner tool
-("run_python_tool") that is equipped with Python 3.12+.
-
-The database is exposed to you using an SQLAlchemy Engine object which you can
-import as follows:
-
-```
-from src.database import engine
-```
-
-Always include the above line when referring to the databse. You can now use
-the engine object imported above to list tables, schema etc., and also to run
-queries.
-
-The python tool returns the stdout of the program and hence you can use print
-statements to get the information you want. 
-
-Given an input question, create a syntactically correct code to run, then look
-at the results of the run, and return the answer. You can also use the tool to
-create artifiacts such as plots to show the user.
-
-Here is an example of code that lists all the tables in the database:
-
-```
-{example_code}
-```
-
-You also have a available a `get_database_hints` tool that returns some hints
-about the contents os the database.
-
-DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
-
-{output_instructions}
-""".format(
-        example_code=SQLA_LIST_TABLES_PYTHON,
-        output_instructions=PydanticOutputParser(pydantic_object=AnswerSchema).get_format_instructions()
-)
-
-def react_node(state: MessagesState, config: RunnableConfig):
-    """
-    The main node in which we invoke the reasoning ability of the agent.
-    """
-    # create a system prompt.
-    system_message = SystemMessage(react_system_prompt)
-    # bind the python runner tool the the LLM.
-    cfg = config['configurable'] # pyright: ignore[reportTypedDictNotRequiredAccess]
-    llm_with_tools = cfg['llm'].bind_tools([cfg['python_runner'].tool(), get_database_hints])
-    # invoke the LLM.
-    response = llm_with_tools.invoke([system_message] + state["messages"])
-    return {"messages": [response]}
-
-def route_tool(state: MessagesState) -> Literal[END, 'run_python']:
-    messages = state["messages"]
-    last_message = messages[-1]
-    assert isinstance(last_message, AIMessage)
-    tool_calls = last_message.tool_calls
-    if len(tool_calls) == 0:
-        return END
-    else:
-        return 'run_python'
-
-def should_get_table_meta(_: MessagesState, config: RunnableConfig) -> Literal["react_node", "list_tables"]:
-    if config['configurable']['first_time']: # type: ignore
-        return 'list_tables'
-    else:
-        return 'react_node'
 
 class SQLAgentPolicy(abc.ABC):
     """
@@ -227,6 +95,197 @@ class SQLAgentPolicy(abc.ABC):
         """
         return None
 
+@dataclass
+class SQLAgentGlobals:
+    """
+    A global variable for tools to access non-trivial agent related objects.
+    The config object will just contain an index of the global object
+    associated with the agent.
+    """
+    llm: BaseChatModel
+    agent_policy: SQLAgentPolicy
+    python_runner: PythonRunnerTool
+
+class SQLAgentGlobalsRegistry:
+    """
+    A registry to keep track of every SQLAgentGlobal object created.
+    """
+    def __init__(self):
+        self.globals: List[SQLAgentGlobals] = []
+
+    def register_globals(
+            self,
+            llm: BaseChatModel,
+            agent_policy: SQLAgentPolicy,
+            python_runner: PythonRunnerTool
+            ):
+        idx = len(self.globals)
+        self.globals.append(SQLAgentGlobals(
+            llm=llm, agent_policy=agent_policy, python_runner=python_runner
+        ))
+        return idx
+
+    def get_globals(self, index) -> SQLAgentGlobals:
+        return self.globals[index]
+
+# a registry to keep track of non-trivial objects needed by the nodes and
+# tools.
+agent_globals_registry = SQLAgentGlobalsRegistry()
+
+class SQLAgentState(MessagesState):
+    first_time: bool
+
+SQLA_LIST_TABLES_PYTHON=r"""
+from src.database import engine
+from sqlalchemy import MetaData
+
+# Create a metadata object
+metadata = MetaData()
+metadata.reflect(bind=engine)
+
+# Get the table names
+table_names = metadata.tables.keys()
+print('Available tables are:', list(table_names))
+"""
+
+SQLA_GET_SCHEMA_PYTHON=r"""
+from src.database import engine
+from sqlalchemy import MetaData
+from sqlalchemy.schema import CreateTable
+
+# Load metadata
+metadata = MetaData()
+metadata.reflect(bind=engine)
+
+# Generate CREATE TABLE statements
+for table_name, table in metadata.tables.items():
+    create_statement = str(CreateTable(table).compile(engine))
+    print(f"Schema for '{table_name} table':\n{create_statement}\n")
+
+"""
+def _run_python_tool(code: str, config:RunnableConfig):
+    tool_call = {
+        "name": "run_python_tool",
+        "args": {
+            'python_code': code,
+            'artifacts_abs_paths': [],
+        },
+        "id": uuid4().hex,
+        "type": "tool_call",
+    }
+    tool_call_message = AIMessage(content="", tool_calls=[tool_call])
+    python_runner = agent_globals_registry.get_globals(0).python_runner
+    tool_message = python_runner.tool().invoke(tool_call, config=config)
+    return tool_call_message, tool_message
+
+def list_tables(state: SQLAgentState, config: RunnableConfig):
+    """
+    Create a pre-determined tool call to list database table entries.
+    """
+    tool_call_message, tool_message = _run_python_tool(SQLA_LIST_TABLES_PYTHON, config, state)
+    return {"messages": [tool_call_message, tool_message]}
+
+def call_get_schema(state: SQLAgentState, config: RunnableConfig):
+    """
+    Force the model to query the schema of the SQL database.
+    """
+    tool_call_message, tool_message = _run_python_tool(SQLA_GET_SCHEMA_PYTHON, config, state)
+    return {"messages": [tool_call_message, tool_message]}
+
+class AnswerSchema(BaseModel):
+    message: str = Field(description="""
+    The answer to the user's question in markdown format. Include links to artifacts as appropriate.
+    """)
+    user_artifacts_abs_paths: List[str] = Field(description="""
+    Local paths of artifacts (if any) produced as a part of the user's answer.
+    """)
+
+react_system_prompt ="""
+You are an agent designed to interact with a SQL database. You'll do so by
+writing and executing python code using a python runner tool
+("run_python_tool") that is equipped with Python 3.12+.
+
+The database is exposed to you using an SQLAlchemy Engine object which you can
+import as follows:
+
+```
+from src.database import engine
+```
+
+Always include the above line when referring to the databse. You can now use
+the engine object imported above to list tables, schema etc., and also to run
+queries.
+
+The python tool returns the stdout of the program and hence you can use print
+statements to get the information you want. 
+
+Given an input question, create a syntactically correct code to run, then look
+at the results of the run, and return the answer. You can also use the tool to
+create artifiacts such as plots to show the user.
+
+Here is an example of code that lists all the tables in the database:
+
+```
+{example_code}
+```
+
+You also have a available a `get_database_hints` tool that returns some hints
+about the contents os the database.
+
+DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
+
+{output_instructions}
+""".format(
+        example_code=SQLA_LIST_TABLES_PYTHON,
+        output_instructions=PydanticOutputParser(pydantic_object=AnswerSchema).get_format_instructions()
+)
+
+def react_node(state: SQLAgentState, config: RunnableConfig):
+    """
+    The main node in which we invoke the reasoning ability of the agent.
+    """
+    # create a system prompt.
+    system_message = SystemMessage(react_system_prompt)
+    # bind the python runner tool the the LLM.
+    cfg = agent_globals_registry.get_globals(0)
+    llm_with_tools = cfg.llm.bind_tools([cfg.python_runner.tool(), get_database_hints])
+    # invoke the LLM.
+    response = llm_with_tools.invoke([system_message] + state["messages"])
+    return {"messages": [response]}
+
+def route_tool(state: SQLAgentState) -> Literal[END, 'run_python']:
+    messages = state["messages"]
+    last_message = messages[-1]
+    assert isinstance(last_message, AIMessage)
+    tool_calls = last_message.tool_calls
+    if len(tool_calls) == 0:
+        return END
+    else:
+        return 'run_python'
+
+def should_get_table_meta(state: SQLAgentState, config: RunnableConfig) -> Command[Literal["react_node", "list_tables"]]:
+    
+    # if this is not the first time, then go directly to the react node and
+    # don't update any state.
+    if 'first_time' in state and state['first_time'] == 0:
+        return Command(update={}, goto='react_node')
+    # if this is the first time, go to list_tables and clear first_time.
+    # - also, add runtime configuration to the state, so it available to all
+    #   the tools.
+    else:
+        # XXX should be config[...][config_idx]
+        cfg = agent_globals_registry.get_globals(0)
+        return Command(
+                update = {
+                    'first_time': 0,
+                    'llm': cfg.llm,
+                    'python_runner': cfg.python_runner,
+                    'agent_policy': cfg.agent_policy
+                    }, 
+                goto="list_tables"
+        )
+
+
 SQLITE_DATABASE_LOADER_CODE="""
 import os
 from sqlalchemy import create_engine
@@ -254,7 +313,7 @@ class SQLiteAgentPolicy(SQLAgentPolicy):
         )
 
 def _get_database_hints(config: RunnableConfig) -> str:
-    agent_policy: SQLAgentPolicy = config['configurable']['agent_policy'] # pyright: ignore[reportTypedDictNotRequiredAccess]
+    agent_policy: SQLAgentPolicy = agent_globals_registry.get_globals(0).agent_policy
     hints = agent_policy.database_hints() 
     if hints is not None:
         return hints
@@ -274,7 +333,7 @@ get_database_hints = StructuredTool.from_function(
         return_direct=True
 )
 
-def database_hints_node(state: MessagesState, config: RunnableConfig):
+def database_hints_node(state: SQLAgentState, config: RunnableConfig):
     """
     Create a pre-determined tool call to provide hints about the database.
     """
@@ -289,10 +348,8 @@ def database_hints_node(state: MessagesState, config: RunnableConfig):
     return {"messages": [tool_call_message, tool_message]}
 
 class SQLAgentConfigSchema(TypedDict):
-    first_time: bool
-    llm: BaseChatModel
+    config_idx: bool  
     python_runner: PythonRunnerTool
-    agent_policy: SQLAgentPolicy
 
 class SQLAgent:
 
@@ -339,14 +396,24 @@ class SQLAgent:
         # initialize runtime configuration.
         self._init_config()
 
+    def _set_globals(self) -> int:
+        
+        return agent_globals_registry.register_globals(
+                self.llm,
+                self.agent_policy,
+                self.python_tool
+                )
+
     def _build_graph(self):
 
-        builder = StateGraph(MessagesState, config_schema=SQLAgentConfigSchema)
+        self.config_idx = self._set_globals()
+        builder = StateGraph(SQLAgentState, config_schema=SQLAgentConfigSchema)
 
         # are hints available?
         hints_avail = self.agent_policy.database_hints() is not None
 
         # add nodes.
+        builder.add_node(should_get_table_meta)
         builder.add_node(list_tables)
         builder.add_node(call_get_schema)
         builder.add_node(react_node)
@@ -355,7 +422,7 @@ class SQLAgent:
             builder.add_node(database_hints_node)
 
         # connect them.
-        builder.add_conditional_edges(START, should_get_table_meta)
+        builder.add_edge(START, "should_get_table_meta")
         builder.add_edge("list_tables", "call_get_schema")
         if hints_avail:
             builder.add_edge("call_get_schema", "database_hints_node")
@@ -405,13 +472,10 @@ class SQLAgent:
     def _init_config(self):
 
         self.config = {
-                'recursion_limit': 10,
+                'recursion_limit': 25,
                 'configurable': {
                     'thread_id': 1,
-                    'first_time': True,
-                    'python_runner': self.python_tool,
-                    'llm': self.llm,
-                    'agent_policy': self.agent_policy
+                    'config_idx': self.config_idx
                 }
         }
 
@@ -430,9 +494,6 @@ class SQLAgent:
                 config=self.config # type: ignore
             )
 
-        # don't run steps needed only the first time.
-        self.config['configurable']['first_time'] = False
-        
         print('================================== Final Answer ================================== ')
         final_state = self.agent.get_state(self.config) # pyright: ignore[reportArgumentType]
         final_message = final_state.values['messages'][-1]

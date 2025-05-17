@@ -4,16 +4,18 @@ import subprocess
 import os
 import logging
 import tempfile, tarfile
-from typing import Optional, List
+from typing import Optional, List, Annotated
 from io import BytesIO
 
 import docker
+import docker.errors
 from docker import DockerClient
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, InjectedState
 from pydantic import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langchain.output_parsers import PydanticOutputParser
+from langchain_core.tools import BaseTool
 import yaml
 
 from .third_party.AgentRun.agentrun import AgentRun, UVInstallPolicy
@@ -58,16 +60,24 @@ The tool output follows this schema:
 {output_schema}
 """
 # create a tool.
-def run_python_tool_func(python_code: str, artifacts_abs_paths: List[str], config: RunnableConfig) -> PythonToolOutput:
-    cfg = config['configurable'] # pyright: ignore[reportTypedDictNotRequiredAccess]
-    python_tool: "PythonRunnerTool" = cfg['python_runner']
-    output = python_tool.execute_code(python_code)
+def run_python_tool_func(
+        python_code: str, 
+        artifacts_abs_paths: List[str],
+        python_runner: Annotated["PythonRunnerTool", InjectedToolArg]
+) -> PythonToolOutput:
+    """
+    NOTE: The agent using this tool should have a state field called
+    "python_runner" that will get injected during this tool call and
+    subsequently used during the tool invocation.
+    """
+    python_runner = config['configurable']['python_runner']
+    output = python_runner.execute_code(python_code)
     local_files = []
     for cont_path in artifacts_abs_paths:
         try:
             # copy the file locally
-            local_files.append(python_tool.copy_file_from_container(cont_path))
-        except docker.errors.NotFound:
+            local_files.append(python_runner.copy_file_from_container(cont_path))
+        except docker.errors.NotFound: 
             raise RuntimeError(f"{cont_path} is inaccessible. The program may have failed - here's the output:\n {output}")
     return PythonToolOutput(
             stdout=output,
@@ -121,8 +131,7 @@ class DockerCompose:
                 check=True
                 )
 
-
-class PythonRunnerTool:
+class PythonRunnerTool():
 
     def __init__(self, 
                  docker_compose: DockerCompose,
@@ -273,6 +282,7 @@ class PythonRunnerTool:
             packages = self.get_requirements_txt(fmt='markdown')
             self._tool = StructuredTool.from_function(
                     func=run_python_tool_func,
+                    args_schema=PythonToolInput,
                     name="run_python_tool",
                     description=PYTHON_TOOL_DESCRIPTION.format(
                         output_schema=output_schema,
@@ -285,5 +295,6 @@ class PythonRunnerTool:
     def tool_node(self) -> ToolNode:
         if not self._tool_node:
             self._tool_node = ToolNode([self.tool()], name="run_python")
+            pdb.set_trace()
         return self._tool_node
 
