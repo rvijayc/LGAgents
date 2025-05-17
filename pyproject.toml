@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sqlagent"
+name = "sqlagent_python"
 version = "0.0.1"
 description = "A Toolkit for building SQL Agents that use Python to interact with a SQL database."
 authors = [
@@ -28,10 +28,10 @@ dependencies = [
     "pyyaml",
 ]
 license = {text = "MIT"}
-license-files = ["LICENSE", "sqlagent/third_party/AgentRun/LICENSE"]
+license-files = ["LICENSE", "sqlagent_python/third_party/AgentRun/LICENSE"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["sqlagent"]
+packages = ["sqlagent_python"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov", "pytest-benchmark", "grandalf", "pygraphviz"]
