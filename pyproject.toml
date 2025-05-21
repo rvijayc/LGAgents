@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sqlagent_python"
+name = "lg_agents"
 version = "0.0.1"
 description = "A Toolkit for building SQL Agents that use Python to interact with a SQL database."
 authors = [

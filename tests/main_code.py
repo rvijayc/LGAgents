@@ -4,7 +4,7 @@ import tempfile
 
 import IPython
 
-from sqlagent_python import SQLiteAgentPolicy, DockerConfig, SQLAgent
+from lg_agents import SQLiteAgentPolicy, DockerConfig, SQLAgent
 
 CHINOOK_DATABASE_HINTS="""
 Here are some additional hints about tables and columns the database.
