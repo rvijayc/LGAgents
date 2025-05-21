@@ -26,6 +26,7 @@ dependencies = [
     "uuid",
     "loguru",
     "pyyaml",
+    "agentrun_plus"
 ]
 license = {text = "MIT"}
 license-files = ["LICENSE", "sqlagent_python/third_party/AgentRun/LICENSE"]
