@@ -1,3 +1,0 @@
-[submodule "external/AgentRun"]
-	path = sqlagent_python/third_party/AgentRun
-	url = git@github.com:rvijayc/AgentRun.git

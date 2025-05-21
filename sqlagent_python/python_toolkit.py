@@ -18,7 +18,7 @@ from langchain.output_parsers import PydanticOutputParser
 from langchain_core.tools import BaseTool, ArgsSchema, BaseToolkit
 import yaml
 
-from .third_party.AgentRun.agentrun import AgentRun, UVInstallPolicy
+from agentrun_plus import AgentRun, UVInstallPolicy
 from loguru import logger
 
 class PythonToolInput(BaseModel):
