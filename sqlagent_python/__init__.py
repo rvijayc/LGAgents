@@ -1,2 +1,2 @@
-from .python_toolkit import DockerCompose
+from .python_toolkit import DockerConfig
 from .sql_code_agent import SQLAgent, SQLiteAgentPolicy, SQLAgentPolicy

@@ -15,10 +15,14 @@ from langchain_core.runnables.graph_png import PngDrawer
 from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 from langchain.output_parsers import PydanticOutputParser
-from langchain_core.tools import tool, StructuredTool
+from langchain_core.tools import StructuredTool
 from langgraph.types import Command
+from langgraph.prebuilt import ToolNode
 
-from .python_toolkit import PythonRunnerTool, DockerCompose
+from .python_toolkit import (
+        PythonRunnerToolkit, DockerConfig, PythonRunnerToolContext,
+        PythonRunnerTool
+)
 from .utils import show_image
 
 class SQLAgentPolicy(abc.ABC):
@@ -164,6 +168,8 @@ for table_name, table in metadata.tables.items():
 
 """
 def _run_python_tool(code: str, config:RunnableConfig):
+
+    # create an artificial tool call and an AI message.
     tool_call = {
         "name": "run_python_tool",
         "args": {
@@ -174,23 +180,26 @@ def _run_python_tool(code: str, config:RunnableConfig):
         "type": "tool_call",
     }
     tool_call_message = AIMessage(content="", tool_calls=[tool_call])
-    python_runner = agent_globals_registry.get_globals(0).python_runner
-    tool_message = python_runner.tool().invoke(tool_call, config=config)
-    return tool_call_message, tool_message
+
+    # run the python tool on behalf of AI.
+    config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    python_runner = agent_globals_registry.get_globals(config_idx).python_runner
+    tool_message = python_runner.invoke(tool_call, config=config)
+    
+    # return the request and response.
+    return {"messages": [tool_call_message, tool_message]}
 
 def list_tables(state: SQLAgentState, config: RunnableConfig):
     """
     Create a pre-determined tool call to list database table entries.
     """
-    tool_call_message, tool_message = _run_python_tool(SQLA_LIST_TABLES_PYTHON, config, state)
-    return {"messages": [tool_call_message, tool_message]}
+    return _run_python_tool(SQLA_LIST_TABLES_PYTHON, config)
 
 def call_get_schema(state: SQLAgentState, config: RunnableConfig):
     """
     Force the model to query the schema of the SQL database.
     """
-    tool_call_message, tool_message = _run_python_tool(SQLA_GET_SCHEMA_PYTHON, config, state)
-    return {"messages": [tool_call_message, tool_message]}
+    return _run_python_tool(SQLA_GET_SCHEMA_PYTHON, config)
 
 class AnswerSchema(BaseModel):
     message: str = Field(description="""
@@ -247,8 +256,9 @@ def react_node(state: SQLAgentState, config: RunnableConfig):
     # create a system prompt.
     system_message = SystemMessage(react_system_prompt)
     # bind the python runner tool the the LLM.
-    cfg = agent_globals_registry.get_globals(0)
-    llm_with_tools = cfg.llm.bind_tools([cfg.python_runner.tool(), get_database_hints])
+    config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    cfg = agent_globals_registry.get_globals(config_idx)
+    llm_with_tools = cfg.llm.bind_tools([cfg.python_runner, get_database_hints])
     # invoke the LLM.
     response = llm_with_tools.invoke([system_message] + state["messages"])
     return {"messages": [response]}
@@ -274,7 +284,8 @@ def should_get_table_meta(state: SQLAgentState, config: RunnableConfig) -> Comma
     #   the tools.
     else:
         # XXX should be config[...][config_idx]
-        cfg = agent_globals_registry.get_globals(0)
+        config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        cfg = agent_globals_registry.get_globals(config_idx)
         return Command(
                 update = {
                     'first_time': 0,
@@ -313,7 +324,8 @@ class SQLiteAgentPolicy(SQLAgentPolicy):
         )
 
 def _get_database_hints(config: RunnableConfig) -> str:
-    agent_policy: SQLAgentPolicy = agent_globals_registry.get_globals(0).agent_policy
+    config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    agent_policy: SQLAgentPolicy = agent_globals_registry.get_globals(config_idx).agent_policy
     hints = agent_policy.database_hints() 
     if hints is not None:
         return hints
@@ -348,14 +360,13 @@ def database_hints_node(state: SQLAgentState, config: RunnableConfig):
     return {"messages": [tool_call_message, tool_message]}
 
 class SQLAgentConfigSchema(TypedDict):
-    config_idx: bool  
-    python_runner: PythonRunnerTool
+    config_idx: int  
 
 class SQLAgent:
 
     def __init__(self, 
                  agent_policy:SQLAgentPolicy,
-                 docker_compose: DockerCompose,
+                 docker_config: DockerConfig,
                  tmpdir: str,
                  model:str = "openai:gpt-4.1"
     ):
@@ -369,15 +380,27 @@ class SQLAgent:
                 tempfile.TemporaryDirectory() context manager for this).
         """
 
-        # initialization.
+        # initialize LLM.
         self.llm = init_chat_model(model)
-        # create the python runner.
-        self.python_tool = PythonRunnerTool(
-                docker_compose,
+
+        # configure the python runner.
+        self.python_tool = PythonRunnerToolContext(
+                docker_config,
                 tmpdir,
                 ignore_dependencies=['src'],
                 ignore_unsafe_functions=['compile']
         )
+        self.python_toolkit = PythonRunnerToolkit.from_context(
+                config=self.python_tool
+        )
+        # python toolkit only exposes a single tool
+        self.python_runner_tool: PythonRunnerTool = next(
+                tool 
+                for tool in self.python_toolkit.get_tools() 
+                if tool.name == "run_python_tool"
+        ) # pyright: ignore[reportAttributeAccessIssue]
+
+        # latch agent policy.
         self.agent_policy: SQLAgentPolicy = agent_policy
 
         # initialize the database configuration.
@@ -401,7 +424,7 @@ class SQLAgent:
         return agent_globals_registry.register_globals(
                 self.llm,
                 self.agent_policy,
-                self.python_tool
+                self.python_runner_tool
                 )
 
     def _build_graph(self):
@@ -417,7 +440,7 @@ class SQLAgent:
         builder.add_node(list_tables)
         builder.add_node(call_get_schema)
         builder.add_node(react_node)
-        builder.add_node(self.python_tool.tool_node())
+        builder.add_node(ToolNode([self.python_runner_tool], name="run_python"))
         if hints_avail:
             builder.add_node(database_hints_node)
 

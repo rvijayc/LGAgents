@@ -4,18 +4,18 @@ import subprocess
 import os
 import logging
 import tempfile, tarfile
-from typing import Optional, List, Annotated
+from typing import Optional, List
 from io import BytesIO
 
 import docker
 import docker.errors
 from docker import DockerClient
-from langgraph.prebuilt import ToolNode, InjectedState
+from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langchain.output_parsers import PydanticOutputParser
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ArgsSchema, BaseToolkit
 import yaml
 
 from .third_party.AgentRun.agentrun import AgentRun, UVInstallPolicy
@@ -59,32 +59,7 @@ referencing in downstream invocations of the tool.
 The tool output follows this schema:
 {output_schema}
 """
-# create a tool.
-def run_python_tool_func(
-        python_code: str, 
-        artifacts_abs_paths: List[str],
-        python_runner: Annotated["PythonRunnerTool", InjectedToolArg]
-) -> PythonToolOutput:
-    """
-    NOTE: The agent using this tool should have a state field called
-    "python_runner" that will get injected during this tool call and
-    subsequently used during the tool invocation.
-    """
-    python_runner = config['configurable']['python_runner']
-    output = python_runner.execute_code(python_code)
-    local_files = []
-    for cont_path in artifacts_abs_paths:
-        try:
-            # copy the file locally
-            local_files.append(python_runner.copy_file_from_container(cont_path))
-        except docker.errors.NotFound: 
-            raise RuntimeError(f"{cont_path} is inaccessible. The program may have failed - here's the output:\n {output}")
-    return PythonToolOutput(
-            stdout=output,
-            user_artifacts_abs_paths=local_files
-    )
-
-class DockerCompose:
+class DockerConfig:
 
     def __init__(self, docker_compose_yml:Optional[str]=None):
 
@@ -131,10 +106,10 @@ class DockerCompose:
                 check=True
                 )
 
-class PythonRunnerTool():
+class PythonRunnerToolContext():
 
     def __init__(self, 
-                 docker_compose: DockerCompose,
+                 docker_compose: DockerConfig,
                  tmpdir: str, 
                  ignore_dependencies: Optional[List[str]]=None,
                  ignore_unsafe_functions: Optional[List[str]]=None,
@@ -144,7 +119,7 @@ class PythonRunnerTool():
         Initialize the PythonRunnerTool.
 
         Args:
-            docker_compose: A DockerCompose instance that starts the docker
+            docker_compose: A DockerConfig instance that starts the docker
                 image using a context manager.
             tempdir: A temporary folder to store temporary files (to be deleted
                 on program exit). Use the tempfile.TemporaryDirectory context
@@ -276,25 +251,57 @@ class PythonRunnerTool():
         assert os.path.isfile(dst_path)
         return dst_path
 
-    def tool(self) -> StructuredTool:
-        if not self._tool:
-            output_schema = PydanticOutputParser(pydantic_object=PythonToolOutput).get_output_jsonschema()
-            packages = self.get_requirements_txt(fmt='markdown')
-            self._tool = StructuredTool.from_function(
-                    func=run_python_tool_func,
-                    args_schema=PythonToolInput,
-                    name="run_python_tool",
-                    description=PYTHON_TOOL_DESCRIPTION.format(
-                        output_schema=output_schema,
-                        packages=packages
-                    ),
-                    return_direct=True
+class PythonRunnerTool(BaseTool):
+
+    # overrides from BaseTool
+    name: str = "run_python_tool"
+    args_schema: ArgsSchema | None = PythonToolInput 
+    description: str = ""   # fill this in during construction.
+    return_direct: bool = True
+
+    # our configuration.
+    config: PythonRunnerToolContext
+    
+    def _run(
+            self,
+            python_code: str,
+            artifacts_abs_paths: List[str]
+    ):
+        python_runner = self.config
+        output = python_runner.execute_code(python_code)
+        local_files = []
+        for cont_path in artifacts_abs_paths:
+            try:
+                # copy the file locally
+                local_files.append(python_runner.copy_file_from_container(cont_path))
+            except docker.errors.NotFound: 
+                raise RuntimeError(f"{cont_path} is inaccessible. The program may have failed - here's the output:\n {output}")
+        return PythonToolOutput(
+                stdout=output,
+                user_artifacts_abs_paths=local_files
+        )
+
+class PythonRunnerToolkit(BaseToolkit):
+    tools: List[BaseTool]
+
+    @classmethod
+    def from_context(
+            cls,
+            config: PythonRunnerToolContext = Field(exclude=True)
+    ):
+        output_schema = PydanticOutputParser(pydantic_object=PythonToolOutput).get_output_jsonschema()
+        packages = config.get_requirements_txt(fmt='markdown')
+        return cls(
+                tools=[
+                    PythonRunnerTool(
+                        description=PYTHON_TOOL_DESCRIPTION.format(
+                            output_schema=output_schema,
+                            packages=packages,
+                        ),
+                        config=config
+                    )
+                ]
             )
-        return self._tool
 
-    def tool_node(self) -> ToolNode:
-        if not self._tool_node:
-            self._tool_node = ToolNode([self.tool()], name="run_python")
-            pdb.set_trace()
-        return self._tool_node
-
+    def get_tools(self) -> List[BaseTool]:
+        return self.tools

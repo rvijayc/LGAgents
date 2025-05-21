@@ -4,7 +4,7 @@ import tempfile
 
 import IPython
 
-from sqlagent_python import SQLiteAgentPolicy, DockerCompose, SQLAgent
+from sqlagent_python import SQLiteAgentPolicy, DockerConfig, SQLAgent
 
 CHINOOK_DATABASE_HINTS="""
 Here are some additional hints about tables and columns the database.
@@ -28,7 +28,7 @@ class ChinookSQLitePolicy(SQLiteAgentPolicy):
 
 def main():
     
-    with DockerCompose() as dc, tempfile.TemporaryDirectory() as tempdir:
+    with DockerConfig() as dc, tempfile.TemporaryDirectory() as tempdir:
         policy = ChinookSQLitePolicy()
         agent = SQLAgent(policy, dc, tempdir)
         agent.chat('Which artists have the most revenue?')
