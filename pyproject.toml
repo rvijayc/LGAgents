@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sqlagent_python"
-version = "0.0.1"
+name = "lg_agents"
+version = "0.0.3"
 description = "A Toolkit for building SQL Agents that use Python to interact with a SQL database."
 authors = [
     {name = "Vijay Ramasami", email = "rvijayc@gmail.com"}
@@ -26,13 +26,14 @@ dependencies = [
     "uuid",
     "loguru",
     "pyyaml",
-    "agentrun_plus"
+    "agentrun_plus",
+    "tqdm"
 ]
 license = {text = "MIT"}
-license-files = ["LICENSE", "sqlagent_python/third_party/AgentRun/LICENSE"]
+license-files = ["LICENSE"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["sqlagent_python"]
+packages = ["lg_agents"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov", "pytest-benchmark", "grandalf", "pygraphviz"]

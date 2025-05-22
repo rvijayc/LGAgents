@@ -13,3 +13,4 @@ loguru
 pytest
 pytest-benchmark
 pyyaml
+tqdm

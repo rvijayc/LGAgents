@@ -80,15 +80,60 @@ class DockerConfig:
                 level="INFO",
                 enqueue=True
         )
+        self.running_on_enter = False
+
+    @staticmethod
+    def is_docker_installed():
+        try:
+            client = docker.from_env()
+            _ = client.version()
+            return True
+        except docker.errors.DockerException:
+            return False
+
+    def is_container_running(self):
+
+        client = docker.from_env()
+
+        for _, config in self.docker_yml['services'].items():
+            container_name = config['container_name']
+            try:
+                container = client.containers.get(container_name)
+                match container.status:
+                    case "running":
+                        # if the container is running we are good ...
+                        pass
+                    case "exited":
+                        # if the container was stopped remove it before continuing.
+                        self.log.info(f'Stopping container {container_name} ...')
+                        container.remove()
+                    case _:
+                        # otherwise, assume it can started again.
+                        return False
+            except docker.errors.NotFound:
+                self.log.error(f"Container '{container_name}' not found.")
+                return False
+            except docker.errors.DockerException as e:
+                self.log.error(f"Error: {e}")
+                return False
+
+        return True
 
     def __enter__(self):
-        self.log.info('Starting Docker Container ...')
-        subprocess.run(
-                ['docker', 'compose', 'up', '--build', '-d'], 
-                cwd=self.code_runner_path,
-                check=True
-                )
-        return self
+
+        if self.is_container_running():
+            self.log.info(f'Docker container is already running ...')
+            self.running_on_enter = True
+            return self
+        else:
+            self.running_on_enter = False
+            self.log.info('Starting Docker Container ...')
+            subprocess.run(
+                    ['docker', 'compose', 'up', '--build', '-d'], 
+                    cwd=self.code_runner_path,
+                    check=True
+                    )
+            return self
 
     def get_container_name(self, service_name: str):
         return self.docker_yml['services'][service_name]['container_name']
@@ -99,17 +144,22 @@ class DockerConfig:
         return reqs_file
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.log.info('Stopping Python Container ...')
-        subprocess.run(
-                ['docker', 'compose', 'down'],
-                cwd=self.code_runner_path,
-                check=True
-                )
+        # don't stop the docker container if it was running on entry.
+        if not self.running_on_enter:
+            self.log.info('Stopping Python Container ...')
+            subprocess.run(
+                    ['docker', 'compose', 'down'],
+                    cwd=self.code_runner_path,
+                    check=True
+                    )
+
+class DockerContainerNotFound(RuntimeError):
+    pass
 
 class PythonRunnerToolContext():
 
     def __init__(self, 
-                 docker_compose: DockerConfig,
+                 docker_config: DockerConfig,
                  tmpdir: str, 
                  ignore_dependencies: Optional[List[str]]=None,
                  ignore_unsafe_functions: Optional[List[str]]=None,
@@ -119,21 +169,30 @@ class PythonRunnerToolContext():
         Initialize the PythonRunnerTool.
 
         Args:
-            docker_compose: A DockerConfig instance that starts the docker
+            docker_config: A DockerConfig instance that starts the docker
                 image using a context manager.
             tempdir: A temporary folder to store temporary files (to be deleted
                 on program exit). Use the tempfile.TemporaryDirectory context
                 manager for this.
         """
+        # latch parameters.
         self.debug = debug
-        self.log = logging.getLogger('PYTHON_RUNNER')
         self.client: DockerClient = docker.from_env()
         self.ignore_dependencies = ignore_dependencies
         self.ignore_unsafe_functions = ignore_unsafe_functions
+        self.tmpdir = tmpdir
+
+        # initializations.
         self._tool_node: Optional[ToolNode] = None
         self._tool: Optional[StructuredTool] = None
-        self.docker_compose = docker_compose
-        container_name = self.docker_compose.get_container_name("python_runner")
+        self.log = logging.getLogger('PYTHON_RUNNER')
+
+        # check if Docker is running by the time this context is created, and
+        # intialize AgentRun.
+        if not docker_config.is_container_running():
+            raise DockerContainerNotFound(f"Docker container service 'python_runner' isn't running!")
+        self.docker_config = docker_config
+        container_name = self.docker_config.get_container_name("python_runner")
         self.container = self.client.containers.get(container_name)
         self.python_runner = AgentRun(
                 container_name=container_name,
@@ -143,7 +202,7 @@ class PythonRunnerToolContext():
                 default_timeout=100,
                 log_level = 'INFO' if self.debug is True else 'WARNING',
                 )
-        self.tmpdir = tmpdir
+
 
     def execute_code(self, code: str):
         return self.python_runner.execute_code_in_container(
@@ -159,7 +218,7 @@ class PythonRunnerToolContext():
             self,
             fmt="markdown"
     ) -> str:
-        requirements_txt = self.docker_compose.get_requirements_txt()
+        requirements_txt = self.docker_config.get_requirements_txt()
         lines: List[str] = []
         with open(requirements_txt, 'rt') as f:
             lines = f.readlines()
@@ -234,17 +293,21 @@ class PythonRunnerToolContext():
         # use temporary folder itself if destination isn't specified.
         if not dst_folder:
             dst_folder = os.path.join(self.tmpdir)
-        
-        with tempfile.NamedTemporaryFile(delete_on_close=False) as tmpfp:
 
-            # write the tar stream on to a temporary file ...
-            for chunk in stream:
-                tmpfp.write(chunk)
-            tmpfp.close()
+        with tempfile.NamedTemporaryFile(delete=False) as tmpfp:
+            try:
+                # write the tar stream on to a temporary file ...
+                for chunk in stream:
+                    tmpfp.write(chunk)
+                # close it (the file won't get deleted).
+                tmpfp.close()
 
-            # ... and extract it.
-            with tarfile.open(tmpfp.name) as tar:
-                tar.extractall(dst_folder)
+                # extract it.
+                with tarfile.open(tmpfp.name) as tar:
+                    tar.extractall(dst_folder)
+            finally:
+                # delete the tar file eventually.
+                os.unlink(tmpfp.name)
 
         # return the destination file name.
         dst_path = os.path.join(dst_folder, os.path.basename(src_path))
