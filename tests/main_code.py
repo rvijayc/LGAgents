@@ -4,6 +4,7 @@ import tempfile
 
 import IPython
 
+from langchain.chat_models import init_chat_model
 from lg_agents import SQLiteAgentPolicy, DockerConfig, SQLAgent
 
 CHINOOK_DATABASE_HINTS="""
@@ -28,9 +29,16 @@ class ChinookSQLitePolicy(SQLiteAgentPolicy):
 
 def main():
     
+    model = init_chat_model('openai:gpt-4.1')
     with DockerConfig() as dc, tempfile.TemporaryDirectory() as tempdir:
         policy = ChinookSQLitePolicy()
-        agent = SQLAgent(policy, dc, tempdir)
+        agent = SQLAgent(
+                agent_policy=policy, 
+                docker_config=dc, 
+                tmpdir=tempdir,
+                show_artifacts=True,
+                model=model
+        )
         agent.chat('Which artists have the most revenue?')
         IPython.embed()
 

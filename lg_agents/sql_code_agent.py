@@ -18,6 +18,7 @@ from langchain.output_parsers import PydanticOutputParser
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 from langgraph.prebuilt import ToolNode
+from tqdm import tqdm
 
 from .python_toolkit import (
         PythonRunnerToolkit, DockerConfig, PythonRunnerToolContext,
@@ -99,43 +100,6 @@ class SQLAgentPolicy(abc.ABC):
         """
         return None
 
-@dataclass
-class SQLAgentGlobals:
-    """
-    A global variable for tools to access non-trivial agent related objects.
-    The config object will just contain an index of the global object
-    associated with the agent.
-    """
-    llm: BaseChatModel
-    agent_policy: SQLAgentPolicy
-    python_runner: PythonRunnerTool
-
-class SQLAgentGlobalsRegistry:
-    """
-    A registry to keep track of every SQLAgentGlobal object created.
-    """
-    def __init__(self):
-        self.globals: List[SQLAgentGlobals] = []
-
-    def register_globals(
-            self,
-            llm: BaseChatModel,
-            agent_policy: SQLAgentPolicy,
-            python_runner: PythonRunnerTool
-            ):
-        idx = len(self.globals)
-        self.globals.append(SQLAgentGlobals(
-            llm=llm, agent_policy=agent_policy, python_runner=python_runner
-        ))
-        return idx
-
-    def get_globals(self, index) -> SQLAgentGlobals:
-        return self.globals[index]
-
-# a registry to keep track of non-trivial objects needed by the nodes and
-# tools.
-agent_globals_registry = SQLAgentGlobalsRegistry()
-
 class SQLAgentState(MessagesState):
     first_time: bool
 
@@ -182,8 +146,8 @@ def _run_python_tool(code: str, config:RunnableConfig):
     tool_call_message = AIMessage(content="", tool_calls=[tool_call])
 
     # run the python tool on behalf of AI.
-    config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
-    python_runner = agent_globals_registry.get_globals(config_idx).python_runner
+    config_idx: int = config['configurable'].get('config_idx', 0) # pyright: ignore[reportTypedDictNotRequiredAccess]
+    python_runner = agent_globals_registry.get_globals(config_idx).agent.python_runner_tool
     tool_message = python_runner.invoke(tool_call, config=config)
     
     # return the request and response.
@@ -209,7 +173,7 @@ class AnswerSchema(BaseModel):
     Local paths of artifacts (if any) produced as a part of the user's answer.
     """)
 
-react_system_prompt ="""
+REACT_SYSTEM_PROMPT ="""
 You are an agent designed to interact with a SQL database. You'll do so by
 writing and executing python code using a python runner tool
 ("run_python_tool") that is equipped with Python 3.12+.
@@ -244,21 +208,19 @@ about the contents os the database.
 DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
 
 {output_instructions}
-""".format(
-        example_code=SQLA_LIST_TABLES_PYTHON,
-        output_instructions=PydanticOutputParser(pydantic_object=AnswerSchema).get_format_instructions()
-)
+"""
 
 def react_node(state: SQLAgentState, config: RunnableConfig):
     """
     The main node in which we invoke the reasoning ability of the agent.
     """
+    # get agent instance.
+    config_idx: int = config['configurable'].get('config_idx', 0)  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    agent: SQLAgent = agent_globals_registry.get_globals(config_idx).agent
     # create a system prompt.
-    system_message = SystemMessage(react_system_prompt)
+    system_message = SystemMessage(agent.system_prompt)
     # bind the python runner tool the the LLM.
-    config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
-    cfg = agent_globals_registry.get_globals(config_idx)
-    llm_with_tools = cfg.llm.bind_tools([cfg.python_runner, get_database_hints])
+    llm_with_tools = agent.llm.bind_tools([agent.python_runner_tool, get_database_hints])
     # invoke the LLM.
     response = llm_with_tools.invoke([system_message] + state["messages"])
     return {"messages": [response]}
@@ -283,15 +245,9 @@ def should_get_table_meta(state: SQLAgentState, config: RunnableConfig) -> Comma
     # - also, add runtime configuration to the state, so it available to all
     #   the tools.
     else:
-        # XXX should be config[...][config_idx]
-        config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        cfg = agent_globals_registry.get_globals(config_idx)
         return Command(
                 update = {
                     'first_time': 0,
-                    'llm': cfg.llm,
-                    'python_runner': cfg.python_runner,
-                    'agent_policy': cfg.agent_policy
                     }, 
                 goto="list_tables"
         )
@@ -324,8 +280,8 @@ class SQLiteAgentPolicy(SQLAgentPolicy):
         )
 
 def _get_database_hints(config: RunnableConfig) -> str:
-    config_idx: int = config['configurable']['config_idx']  # pyright: ignore[reportTypedDictNotRequiredAccess]
-    agent_policy: SQLAgentPolicy = agent_globals_registry.get_globals(config_idx).agent_policy
+    config_idx: int = config['configurable'].get('config_idx', 0)  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    agent_policy: SQLAgentPolicy = agent_globals_registry.get_globals(config_idx).agent.agent_policy
     hints = agent_policy.database_hints() 
     if hints is not None:
         return hints
@@ -368,20 +324,32 @@ class SQLAgent:
                  agent_policy:SQLAgentPolicy,
                  docker_config: DockerConfig,
                  tmpdir: str,
-                 model:str = "openai:gpt-4.1"
+                 model: str | BaseChatModel = "openai:gpt-4.1",
+                 show_artifacts: bool =False,
+                 recursion_limit: int =25
     ):
         """
         Creates a new SQL Agent.
 
         Args:
             agent_policy: App specific customization for the agent.
+            docker_config: Docker configuration for Python Tool.
             tmpdir: A temporary directory to use for the temporary files
                 created during the agent run (recommend using
                 tempfile.TemporaryDirectory() context manager for this).
+            model: The model to use.
+            recursion_limit: The max number of graph state transitions to
+                execute.
         """
 
+        # latch parameters.
+        self.recursion_limit = recursion_limit
+
         # initialize LLM.
-        self.llm = init_chat_model(model)
+        if isinstance(model, str):
+            self.llm = init_chat_model(model)
+        else:
+            self.llm = model
 
         # configure the python runner.
         self.python_tool = PythonRunnerToolContext(
@@ -419,13 +387,20 @@ class SQLAgent:
         # initialize runtime configuration.
         self._init_config()
 
+        # generate system prompt for react agent.
+        self.show_artifacts = show_artifacts
+        if show_artifacts:
+            output_instructions = PydanticOutputParser(pydantic_object=AnswerSchema).get_format_instructions()
+        else:
+            output_instructions = "Return your answer with Markdown formatting."
+        self.system_prompt = REACT_SYSTEM_PROMPT.format(
+            example_code=SQLA_LIST_TABLES_PYTHON,
+            output_instructions=output_instructions
+        )
+
     def _set_globals(self) -> int:
         
-        return agent_globals_registry.register_globals(
-                self.llm,
-                self.agent_policy,
-                self.python_runner_tool
-                )
+        return agent_globals_registry.register_globals(self)
 
     def _build_graph(self):
 
@@ -495,32 +470,63 @@ class SQLAgent:
     def _init_config(self):
 
         self.config = {
-                'recursion_limit': 25,
+                'recursion_limit': self.recursion_limit,
                 'configurable': {
                     'thread_id': 1,
                     'config_idx': self.config_idx
                 }
         }
 
-    def chat(self, question:str, quiet=False, show_artifacts=True):
+    def chat(self, question:str, quiet=True):
 
-        if not quiet:
-            for step in self.agent.stream(
-                {"messages": [HumanMessage(question)]},
-                stream_mode="values",
-                config=self.config # type: ignore
-            ):
+        gen = self.agent.stream(
+            {"messages": [HumanMessage(question)]}, 
+            stream_mode="values", 
+            config=self.config # type: ignore
+        )
+        gen = tqdm(gen, desc="Thinking ...", total=self.recursion_limit) if quiet else gen
+        for step in gen:
+            if not quiet:
                 step["messages"][-1].pretty_print()
-        else:
-            result = self.agent.invoke(
-                {"messages": [HumanMessage(question)]},
-                config=self.config # type: ignore
-            )
 
         print('================================== Final Answer ================================== ')
         final_state = self.agent.get_state(self.config) # pyright: ignore[reportArgumentType]
         final_message = final_state.values['messages'][-1]
-        answer: AnswerSchema = AnswerSchema.model_validate_json(final_message.content)
-        print(answer.message)
-        if show_artifacts:
+        if self.show_artifacts:
+            answer: AnswerSchema = AnswerSchema.model_validate_json(final_message.content)
+            print(answer.message)
             self.display_artifacts(answer.user_artifacts_abs_paths)
+        else:
+            print(final_message.content)
+
+@dataclass
+class SQLAgentGlobals:
+    """
+    A global variable for tools to access non-trivial agent related objects.
+    The config object will just contain an index of the global object
+    associated with the agent.
+    """
+    agent: SQLAgent
+
+class SQLAgentGlobalsRegistry:
+    """
+    A registry to keep track of every SQLAgentGlobal object created.
+    """
+    def __init__(self):
+        self.globals: List[SQLAgentGlobals] = []
+
+    def register_globals(
+            self,
+            agent: SQLAgent
+            ):
+        idx = len(self.globals)
+        self.globals.append(SQLAgentGlobals(agent))
+        return idx
+
+    def get_globals(self, index) -> SQLAgentGlobals:
+        return self.globals[index]
+
+# a registry to keep track of non-trivial objects needed by the nodes and
+# tools.
+agent_globals_registry = SQLAgentGlobalsRegistry()
+
