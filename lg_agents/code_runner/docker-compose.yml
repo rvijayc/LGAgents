@@ -3,9 +3,12 @@ services:
     build:
       context: ./
       dockerfile: Dockerfile
+      args:
+        DOCKER_REGISTRY: "${DOCKER_REGISTRY:-docker.io}"
+    image: ${DOCKER_REGISTRY:-docker.io}/agentrun_plus_python_runner:latest
     container_name: python_runner
     volumes:
-      - code_execution_volume:/code
+      - code_execution_volume:/home/pythonuser
     pids_limit: 10
     security_opt:
       - no-new-privileges:true
