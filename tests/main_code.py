@@ -39,7 +39,7 @@ def main():
                 show_artifacts=True,
                 model=model
         )
-        agent.chat('Which artists have the most revenue?')
+        agent.chat('Which artists have the most revenue?', quiet=False)
         IPython.embed()
 
 if __name__ == "__main__":

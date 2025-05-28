@@ -296,7 +296,7 @@ Returns:
 """
 get_database_hints = StructuredTool.from_function(
         func=_get_database_hints,
-        name="get_database_tool",
+        name="get_database_hints",
         description=GET_DATABASE_HINTS_DESC,
         return_direct=True
 )
@@ -374,9 +374,9 @@ class SQLAgent:
         # initialize the database configuration.
         # - copy any files the application needs.
         for file in self.agent_policy.files_to_copy():
-            self.python_tool.copy_file_to_container(file, '/home/pythonuser/src')
+            self.python_tool.agent_run.copy_file_to_container(file, '/home/pythonuser/src')
         # -- copy the database loader code to container.
-        self.python_tool.copy_code_to_container(
+        self.python_tool.agent_run.copy_code_to_container(
                 self.agent_policy.engine_export_code(),
                 '/home/pythonuser/src/database.py'
         )

@@ -201,7 +201,7 @@ class PythonRunnerToolContext():
         self.docker_config = docker_config
         container_name = self.docker_config.get_container_name("python_runner")
         self.container = self.client.containers.get(container_name)
-        self.python_runner = AgentRun(
+        self.agent_run = AgentRun(
                 container_name=container_name,
                 cached_dependencies = ['sqlalchemy'],
                 install_policy=UVInstallPolicy(),
@@ -212,7 +212,7 @@ class PythonRunnerToolContext():
 
 
     def execute_code(self, code: str):
-        return self.python_runner.execute_code_in_container(
+        return self.agent_run.execute_code_in_container(
                 code, 
                 ignore_dependencies=self.ignore_dependencies,
                 ignore_unsafe_functions=self.ignore_unsafe_functions
@@ -236,90 +236,14 @@ class PythonRunnerToolContext():
             case _: 
                 raise RuntimeError(f'Unknown format: {format}!')
 
-    def copy_code_to_container(
-            self,
-            python_code: str,
-            dst_path
-    ):
-        """Copy Python code to the container.
-        Args:
-            python_code: Python code to copy
-            dst_path: Full destination path (incl. file name) inside the container.
-        """
-        script_path, script_name = os.path.split(dst_path)
-
-        # write the python code to a temporary file.
-        temp_script_path = os.path.join(self.tmpdir, script_name)
-        with open(temp_script_path, "w") as file:
-            file.write(python_code)
-
-        # create a tar stream and add the file to it.
-        tar_stream = BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-            tar.add(temp_script_path, arcname=script_name)
-        tar_stream.seek(0)
-
-        # write the file into the container.
-        exec_result = self.container.put_archive(path=script_path, data=tar_stream)
-        if not exec_result:
-            raise RuntimeError(f'Unable to copy code to {dst_path}!')
-
-    def copy_file_to_container(
-        self, 
-        src_path: str,
-        dst_folder: str
-    ):
-        """Copy Python code to the container.
-        Args:
-            src_path: Path of the file to copy into container.
-            dst_folder: The destination folder inside the container.
-        """
-        # check if the source file exists.
-        if not os.path.isfile(src_path):
-            raise RuntimeError(f'{src_path} is not a valid file!')
-
-        # create a tar archive and add the source file.
-        tar_stream = BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-            tar.add(src_path, arcname=os.path.basename(src_path))
-        tar_stream.seek(0)
-
-        exec_result = self.container.put_archive(path=dst_folder, data=tar_stream)
-        if not exec_result:
-            raise RuntimeError(f'Unable to copy {src_path} into container!')
-
     def copy_file_from_container(
             self, 
             src_path: str,
             dst_folder: Optional[str]=None
             ) -> str:
-
-        # get the archive
-        stream, _ = self.container.get_archive(src_path)
-
-        # use temporary folder itself if destination isn't specified.
-        if not dst_folder:
-            dst_folder = os.path.join(self.tmpdir)
-
-        with tempfile.NamedTemporaryFile(delete=False) as tmpfp:
-            try:
-                # write the tar stream on to a temporary file ...
-                for chunk in stream:
-                    tmpfp.write(chunk)
-                # close it (the file won't get deleted).
-                tmpfp.close()
-
-                # extract it.
-                with tarfile.open(tmpfp.name) as tar:
-                    tar.extractall(dst_folder)
-            finally:
-                # delete the tar file eventually.
-                os.unlink(tmpfp.name)
-
-        # return the destination file name.
-        dst_path = os.path.join(dst_folder, os.path.basename(src_path))
-        assert os.path.isfile(dst_path)
-        return dst_path
+        if dst_folder is None:
+            dst_folder = self.tmpdir
+        return self.agent_run.copy_file_from_container(src_path, dst_folder)
 
 class PythonRunnerTool(BaseTool):
 
