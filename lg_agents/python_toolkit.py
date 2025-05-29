@@ -2,10 +2,8 @@ import sys
 import pdb
 import subprocess
 import os
-import logging
-import tempfile, tarfile
 from typing import Optional, List
-from io import BytesIO
+import abc
 
 import docker
 import docker.errors
@@ -60,10 +58,12 @@ The tool output follows this schema:
 {output_schema}
 """
 class DockerConfig:
+    """
+    Encapsulates a Docker configuration specified by a docker_compose.yml file.
+    """
 
     def __init__(self, 
-                 docker_compose_yml:Optional[str]=None,
-                 docker_compose_cmd: Optional[List[str]]=None,
+                 docker_compose_yml:Optional[str]=None
     ):
 
         if not docker_compose_yml:
@@ -72,14 +72,11 @@ class DockerConfig:
                     "code_runner", 
                     "docker-compose.yml"
                     )
-        if not docker_compose_cmd:
-            self.docker_compose_cmd = ['docker', 'compose']
-        else:
-            self.docker_compose_cmd = docker_compose_cmd
         with open(docker_compose_yml, 'rt') as f:
             self.docker_yml = yaml.load(f, Loader=yaml.Loader)
         self.code_runner_path = os.path.dirname(docker_compose_yml)
-        self.log = logger.bind(name="Docker")
+
+        self.log = logger.bind(name="Docker-Config")
         self.log.remove()
         self.log.add(
                 sys.stderr,
@@ -112,7 +109,7 @@ class DockerConfig:
                         pass
                     case "exited":
                         # if the container was stopped remove it before continuing.
-                        self.log.info(f'Stopping container {container_name} ...')
+                        self.log.info(f'Removing container {container_name} ...')
                         container.remove()
                     case _:
                         # otherwise, assume it can started again.
@@ -126,22 +123,6 @@ class DockerConfig:
 
         return True
 
-    def __enter__(self):
-
-        if self.is_container_running():
-            self.log.info(f'Docker container is already running ...')
-            self.running_on_enter = True
-            return self
-        else:
-            self.running_on_enter = False
-            self.log.info('Starting Docker Container ...')
-            subprocess.run(
-                    self.docker_compose_cmd + ['up', '--build', '-d'], 
-                    cwd=self.code_runner_path,
-                    check=True
-                    )
-            return self
-
     def get_container_name(self, service_name: str):
         return self.docker_yml['services'][service_name]['container_name']
 
@@ -150,24 +131,106 @@ class DockerConfig:
         assert os.path.isfile(reqs_file)
         return reqs_file
     
+
+class DockerRunner:
+    """
+    A context manager for starting and stopping the docker container defined by
+    DockerConfig.
+    """
+    def __init__(
+            self, 
+            docker_config: DockerConfig,
+            docker_compose_cmd: Optional[List[str]]=None
+        ):
+        self.docker_config = docker_config
+        if docker_compose_cmd is None:
+            self.docker_compose_cmd = [ 'docker', 'compose' ]
+        else:
+            self.docker_compose_cmd = docker_compose_cmd
+        self.log = logger.bind(name="Docker-Runner")
+        self.log.remove()
+        self.log.add(
+                sys.stderr,
+                format="{time} {level} {message}",
+                level="INFO",
+                enqueue=True
+        )
+        self.running_on_enter = False
+
+    def __enter__(self):
+
+        if self.docker_config.is_container_running():
+            self.log.info(f'Docker container is already running ...')
+            self.running_on_enter = True
+            return self
+        else:
+            self.running_on_enter = False
+            self.log.info('Starting Docker Container ...')
+            subprocess.run(
+                    self.docker_compose_cmd + ['up', '--build', '-d'], 
+                    cwd=self.docker_config.code_runner_path,
+                    check=True
+                    )
+            return self
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         # don't stop the docker container if it was running on entry.
         if not self.running_on_enter:
             self.log.info('Stopping Python Container ...')
             subprocess.run(
                     self.docker_compose_cmd + ['down'],
-                    cwd=self.code_runner_path,
+                    cwd=self.docker_config.code_runner_path,
                     check=True
                     )
 
 class DockerContainerNotFound(RuntimeError):
     pass
 
+class PythonAppPolicy(abc.ABC):
+    """
+    This policy class allows an application to customize the "PythonRunner"
+    tool for their use case. The code that an LLM produces will run inside a
+    Docker container with a few specific requirements that are described in the
+    docstring for PythonRunnerToolContext.
+
+    You can work with the following assumptions.
+
+    - `/home/pythonuser`: This is the working folder for any code executed by
+      the LLM.
+    - `/home/pythonuser/src`: Hosts any source files needed to expose the any
+      objects to the LLM. 
+        - As an example, a SQL agent will host a file called "database.py"
+          inside the "src/" folder from which an LLM can import the engine
+          object using a line such as `from src.database import engine`. Any
+          additional files needed by the application (such as an sqlite
+          database), can be copied to this folder by overriding the
+          `files_to_copy` method.
+    - `/home/pythonuser/artifacts`: This folder inside the container contains
+      artifacts generated by the LLM code (such as PNG plots).
+    """
+    def files_to_copy(self) -> List[str]:
+        """
+        Specify a list of files to copy into the working directory of the
+        Docker Container.
+        """
+        return []
+
 class PythonRunnerToolContext():
+    """
+    --------------------
+    Docker Requirements:
+    --------------------
+    - The docker container must be setup with a user called "pythonuser" with a
+      home folder called "/home/pythonuser" which is also the current working
+      directory.
+    - The docker container must have a service called "python runner" that must
+      be setup prior to creating this context.
+    """
 
     def __init__(self, 
+                 app_policy: PythonAppPolicy,
                  docker_config: DockerConfig,
-                 tmpdir: str, 
+                 tmpdir: str,
                  ignore_dependencies: Optional[List[str]]=None,
                  ignore_unsafe_functions: Optional[List[str]]=None,
                  debug=False
@@ -188,11 +251,19 @@ class PythonRunnerToolContext():
         self.ignore_dependencies = ignore_dependencies
         self.ignore_unsafe_functions = ignore_unsafe_functions
         self.tmpdir = tmpdir
+        self.app_policy = app_policy
 
         # initializations.
         self._tool_node: Optional[ToolNode] = None
         self._tool: Optional[StructuredTool] = None
-        self.log = logging.getLogger('PYTHON_RUNNER')
+        self.log = logger.bind(name="Python-Runner")
+        self.log.remove()
+        self.log.add(
+                sys.stderr,
+                format="{time} {level} {message}",
+                level="INFO",
+                enqueue=True
+        )
 
         # check if Docker is running by the time this context is created, and
         # intialize AgentRun.
@@ -201,7 +272,7 @@ class PythonRunnerToolContext():
         self.docker_config = docker_config
         container_name = self.docker_config.get_container_name("python_runner")
         self.container = self.client.containers.get(container_name)
-        self.python_runner = AgentRun(
+        self.agent_run = AgentRun(
                 container_name=container_name,
                 cached_dependencies = ['sqlalchemy'],
                 install_policy=UVInstallPolicy(),
@@ -210,9 +281,18 @@ class PythonRunnerToolContext():
                 log_level = 'INFO' if self.debug is True else 'WARNING',
                 )
 
+        # copy any files the application needs.
+        for file in self.app_policy.files_to_copy():
+            self.agent_run.copy_file_to_container(file, '/home/pythonuser/src')
+
+    def copy_code_to_container(
+            self,
+            python_code: str,
+            dest_file_path: str):
+        self.agent_run.copy_code_to_container(python_code, dest_file_path)
 
     def execute_code(self, code: str):
-        return self.python_runner.execute_code_in_container(
+        return self.agent_run.execute_code_in_container(
                 code, 
                 ignore_dependencies=self.ignore_dependencies,
                 ignore_unsafe_functions=self.ignore_unsafe_functions
@@ -236,90 +316,14 @@ class PythonRunnerToolContext():
             case _: 
                 raise RuntimeError(f'Unknown format: {format}!')
 
-    def copy_code_to_container(
-            self,
-            python_code: str,
-            dst_path
-    ):
-        """Copy Python code to the container.
-        Args:
-            python_code: Python code to copy
-            dst_path: Full destination path (incl. file name) inside the container.
-        """
-        script_path, script_name = os.path.split(dst_path)
-
-        # write the python code to a temporary file.
-        temp_script_path = os.path.join(self.tmpdir, script_name)
-        with open(temp_script_path, "w") as file:
-            file.write(python_code)
-
-        # create a tar stream and add the file to it.
-        tar_stream = BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-            tar.add(temp_script_path, arcname=script_name)
-        tar_stream.seek(0)
-
-        # write the file into the container.
-        exec_result = self.container.put_archive(path=script_path, data=tar_stream)
-        if not exec_result:
-            raise RuntimeError(f'Unable to copy code to {dst_path}!')
-
-    def copy_file_to_container(
-        self, 
-        src_path: str,
-        dst_folder: str
-    ):
-        """Copy Python code to the container.
-        Args:
-            src_path: Path of the file to copy into container.
-            dst_folder: The destination folder inside the container.
-        """
-        # check if the source file exists.
-        if not os.path.isfile(src_path):
-            raise RuntimeError(f'{src_path} is not a valid file!')
-
-        # create a tar archive and add the source file.
-        tar_stream = BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-            tar.add(src_path, arcname=os.path.basename(src_path))
-        tar_stream.seek(0)
-
-        exec_result = self.container.put_archive(path=dst_folder, data=tar_stream)
-        if not exec_result:
-            raise RuntimeError(f'Unable to copy {src_path} into container!')
-
     def copy_file_from_container(
             self, 
             src_path: str,
             dst_folder: Optional[str]=None
             ) -> str:
-
-        # get the archive
-        stream, _ = self.container.get_archive(src_path)
-
-        # use temporary folder itself if destination isn't specified.
-        if not dst_folder:
-            dst_folder = os.path.join(self.tmpdir)
-
-        with tempfile.NamedTemporaryFile(delete=False) as tmpfp:
-            try:
-                # write the tar stream on to a temporary file ...
-                for chunk in stream:
-                    tmpfp.write(chunk)
-                # close it (the file won't get deleted).
-                tmpfp.close()
-
-                # extract it.
-                with tarfile.open(tmpfp.name) as tar:
-                    tar.extractall(dst_folder)
-            finally:
-                # delete the tar file eventually.
-                os.unlink(tmpfp.name)
-
-        # return the destination file name.
-        dst_path = os.path.join(dst_folder, os.path.basename(src_path))
-        assert os.path.isfile(dst_path)
-        return dst_path
+        if dst_folder is None:
+            dst_folder = self.tmpdir
+        return self.agent_run.copy_file_from_container(src_path, dst_folder)
 
 class PythonRunnerTool(BaseTool):
 

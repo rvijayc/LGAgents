@@ -22,16 +22,18 @@ from tqdm import tqdm
 
 from .python_toolkit import (
         PythonRunnerToolkit, DockerConfig, PythonRunnerToolContext,
-        PythonRunnerTool
+        PythonRunnerTool, PythonAppPolicy
 )
 from .utils import show_image
 
-class SQLAgentPolicy(abc.ABC):
+class SQLAgentPolicy(PythonAppPolicy):
     """
     This policy class allows an application to customize the SQLAgent for their
     use case. The SQLAgent allows an LLM to interact with a database that is
     exposed as a SQLAlchemy Engine object. The LLM code that interacts with the
     SQLAlchemy Engine object runs inside a Docker container.
+
+    Review the definition of PythonAppPolicy for base class requirements first.
 
     The Docker container has the following "work" folders:
 
@@ -72,14 +74,6 @@ class SQLAgentPolicy(abc.ABC):
     currency column?). If provided, the agent will provide this information to
     the LLM for its reference.
     """
-    
-    def files_to_copy(self) -> List[str]:
-        """
-        Specify a list of files to copy into the working directory of the
-        Docker Container.
-        """
-        return []
-
     @abc.abstractmethod
     def engine_export_code(self) -> str:
         """
@@ -296,7 +290,7 @@ Returns:
 """
 get_database_hints = StructuredTool.from_function(
         func=_get_database_hints,
-        name="get_database_tool",
+        name="get_database_hints",
         description=GET_DATABASE_HINTS_DESC,
         return_direct=True
 )
@@ -353,6 +347,7 @@ class SQLAgent:
 
         # configure the python runner.
         self.python_tool = PythonRunnerToolContext(
+                agent_policy,
                 docker_config,
                 tmpdir,
                 ignore_dependencies=['src'],
@@ -371,10 +366,6 @@ class SQLAgent:
         # latch agent policy.
         self.agent_policy: SQLAgentPolicy = agent_policy
 
-        # initialize the database configuration.
-        # - copy any files the application needs.
-        for file in self.agent_policy.files_to_copy():
-            self.python_tool.copy_file_to_container(file, '/home/pythonuser/src')
         # -- copy the database loader code to container.
         self.python_tool.copy_code_to_container(
                 self.agent_policy.engine_export_code(),

@@ -19,7 +19,7 @@ WORKDIR /home/pythonuser
 RUN mkdir -p artifacts src
 
 # copy necessary python requirements.
-COPY requirements.txt .
+COPY --chown=pythonuser:pythonuser requirements.txt .
 
 # install UV, create a virtual environment and install packages.
 RUN pip install uv
