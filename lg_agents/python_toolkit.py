@@ -16,7 +16,7 @@ from langchain.output_parsers import PydanticOutputParser
 from langchain_core.tools import BaseTool, ArgsSchema, BaseToolkit
 import yaml
 
-from agentrun_plus import AgentRun, UVInstallPolicy
+from agentrun_plus import AgentRun, UVInstallPolicy, InstallPolicy
 from loguru import logger
 
 class PythonToolInput(BaseModel):
@@ -233,7 +233,8 @@ class PythonRunnerToolContext():
                  tmpdir: str,
                  ignore_dependencies: Optional[List[str]]=None,
                  ignore_unsafe_functions: Optional[List[str]]=None,
-                 debug=False
+                 debug=False,
+                 install_policy: Optional[InstallPolicy]=None
     ):
         """
         Initialize the PythonRunnerTool.
@@ -272,10 +273,12 @@ class PythonRunnerToolContext():
         self.docker_config = docker_config
         container_name = self.docker_config.get_container_name("python_runner")
         self.container = self.client.containers.get(container_name)
+        if install_policy is None:
+            install_policy = UVInstallPolicy()
         self.agent_run = AgentRun(
                 container_name=container_name,
                 cached_dependencies = ['sqlalchemy'],
-                install_policy=UVInstallPolicy(),
+                install_policy=install_policy,
                 cpu_quota=100000,
                 default_timeout=100,
                 log_level = 'INFO' if self.debug is True else 'WARNING',

@@ -25,6 +25,7 @@ from .python_toolkit import (
         PythonRunnerTool, PythonAppPolicy
 )
 from .utils import show_image
+from agentrun_plus import InstallPolicy
 
 class SQLAgentPolicy(PythonAppPolicy):
     """
@@ -200,8 +201,16 @@ You also have a available a `get_database_hints` tool that returns some hints
 about the contents os the database.
 
 DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
+"""
 
-{output_instructions}
+REACT_FORMAT_PROMPT="""
+Please format your final response according to this schema: {instructions}.
+
+IMPORTANT: Return ONLY the raw JSON object without any markdown code blocks,
+backticks, or additional text.
+
+Example of correct format:
+{{"message": "Here is my analysis ...", "user_artifacts_abs_paths": ["/path/to/file.png"]}}
 """
 
 def react_node(state: SQLAgentState, config: RunnableConfig):
@@ -216,7 +225,7 @@ def react_node(state: SQLAgentState, config: RunnableConfig):
     # bind the python runner tool the the LLM.
     llm_with_tools = agent.llm.bind_tools([agent.python_runner_tool, get_database_hints])
     # invoke the LLM.
-    response = llm_with_tools.invoke([system_message] + state["messages"])
+    response = llm_with_tools.invoke([system_message] + state["messages"] + [agent.format_prompt])
     return {"messages": [response]}
 
 def route_tool(state: SQLAgentState) -> Literal[END, 'run_python']:
@@ -320,7 +329,8 @@ class SQLAgent:
                  tmpdir: str,
                  model: str | BaseChatModel = "openai:gpt-4.1",
                  show_artifacts: bool =False,
-                 recursion_limit: int =25
+                 recursion_limit: int =25,
+                 py_install_policy: Optional[InstallPolicy]=None
     ):
         """
         Creates a new SQL Agent.
@@ -351,7 +361,8 @@ class SQLAgent:
                 docker_config,
                 tmpdir,
                 ignore_dependencies=['src'],
-                ignore_unsafe_functions=['compile']
+                ignore_unsafe_functions=['compile'],
+                install_policy=py_install_policy
         )
         self.python_toolkit = PythonRunnerToolkit.from_context(
                 config=self.python_tool
@@ -380,14 +391,14 @@ class SQLAgent:
 
         # generate system prompt for react agent.
         self.show_artifacts = show_artifacts
-        if show_artifacts:
-            output_instructions = PydanticOutputParser(pydantic_object=AnswerSchema).get_format_instructions()
-        else:
-            output_instructions = "Return your answer with Markdown formatting."
         self.system_prompt = REACT_SYSTEM_PROMPT.format(
             example_code=SQLA_LIST_TABLES_PYTHON,
-            output_instructions=output_instructions
         )
+
+        # create an output format prompt.
+        parser = PydanticOutputParser(pydantic_object=AnswerSchema)
+        format_instructions = parser.get_format_instructions()
+        self.format_prompt = HumanMessage(REACT_FORMAT_PROMPT.format(instructions=format_instructions))
 
     def _set_globals(self) -> int:
         
