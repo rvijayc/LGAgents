@@ -21,11 +21,10 @@ from langgraph.prebuilt import ToolNode
 from tqdm import tqdm
 
 from .python_toolkit import (
-        PythonRunnerToolkit, DockerConfig, PythonRunnerToolContext,
+        PythonRunnerToolkit, PythonRunnerToolContext,
         PythonRunnerTool, PythonAppPolicy
 )
 from .utils import show_image
-from agentrun_plus import InstallPolicy
 
 class SQLAgentPolicy(PythonAppPolicy):
     """
@@ -133,7 +132,7 @@ def _run_python_tool(code: str, config:RunnableConfig):
         "name": "run_python_tool",
         "args": {
             'python_code': code,
-            'artifacts_abs_paths': [],
+            'artifacts_paths': [],
         },
         "id": uuid4().hex,
         "type": "tool_call",
@@ -164,7 +163,7 @@ class AnswerSchema(BaseModel):
     message: str = Field(description="""
     The answer to the user's question in markdown format. Include links to artifacts as appropriate.
     """)
-    user_artifacts_abs_paths: List[str] = Field(description="""
+    user_artifacts_paths: List[str] = Field(description="""
     Local paths of artifacts (if any) produced as a part of the user's answer.
     """)
 
@@ -210,8 +209,22 @@ IMPORTANT: Return ONLY the raw JSON object without any markdown code blocks,
 backticks, or additional text.
 
 Example of correct format:
-{{"message": "Here is my analysis ...", "user_artifacts_abs_paths": ["/path/to/file.png"]}}
+{{"message": "Here is my analysis ...", "user_artifacts_paths": ["/path/to/file.png"]}}
 """
+
+def adjust_messages(messages):
+    """
+    There are some LLMs that don't like an empty content field. This is a
+    workaround for such cases.
+    """
+    for msg in messages:
+        if (
+                isinstance(msg, AIMessage) and
+                hasattr(msg, 'tool_calls') and
+                msg.tool_calls and
+                not msg.content.strip()
+        ):
+            msg.content = '<thinking>I will use a tool to answer this.</thinking>'
 
 def react_node(state: SQLAgentState, config: RunnableConfig):
     """
@@ -225,7 +238,10 @@ def react_node(state: SQLAgentState, config: RunnableConfig):
     # bind the python runner tool the the LLM.
     llm_with_tools = agent.llm.bind_tools([agent.python_runner_tool, get_database_hints])
     # invoke the LLM.
-    response = llm_with_tools.invoke([system_message] + state["messages"] + [agent.format_prompt])
+    messages = [system_message] + state["messages"] + [agent.format_prompt]
+    # - adjust messages (for some LLMs).
+    adjust_messages(messages)
+    response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
 def route_tool(state: SQLAgentState) -> Literal[END, 'run_python']:
@@ -324,18 +340,18 @@ class SQLAgentConfigSchema(TypedDict):
 class SQLAgent:
 
     def __init__(self, 
+                 agentrun_url,
                  agent_policy:SQLAgentPolicy,
-                 docker_config: DockerConfig,
                  tmpdir: str,
                  model: str | BaseChatModel = "openai:gpt-4.1",
                  show_artifacts: bool =False,
                  recursion_limit: int =25,
-                 py_install_policy: Optional[InstallPolicy]=None
     ):
         """
         Creates a new SQL Agent.
 
         Args:
+            agentrun_url: URL where the agentrun API can be accessed.
             agent_policy: App specific customization for the agent.
             docker_config: Docker configuration for Python Tool.
             tmpdir: A temporary directory to use for the temporary files
@@ -345,6 +361,7 @@ class SQLAgent:
             recursion_limit: The max number of graph state transitions to
                 execute.
         """
+        self.agentrun_url = agentrun_url
 
         # latch parameters.
         self.recursion_limit = recursion_limit
@@ -357,12 +374,11 @@ class SQLAgent:
 
         # configure the python runner.
         self.python_tool = PythonRunnerToolContext(
-                agent_policy,
-                docker_config,
-                tmpdir,
+                agentrun_url = agentrun_url,
+                app_policy=agent_policy,
+                tmpdir=tmpdir,
                 ignore_dependencies=['src'],
                 ignore_unsafe_functions=['compile'],
-                install_policy=py_install_policy
         )
         self.python_toolkit = PythonRunnerToolkit.from_context(
                 config=self.python_tool
@@ -467,7 +483,7 @@ class SQLAgent:
         final_state = self.agent.get_state(self.config) # pyright: ignore[reportArgumentType]
         final_message = final_state.values['messages'][-1]
         answer: AnswerSchema = AnswerSchema.model_validate_json(final_message.content)
-        return answer.user_artifacts_abs_paths
+        return answer.user_artifacts_paths
 
     def _init_config(self):
 
@@ -497,7 +513,7 @@ class SQLAgent:
         if self.show_artifacts:
             answer: AnswerSchema = AnswerSchema.model_validate_json(final_message.content)
             print(answer.message)
-            self.display_artifacts(answer.user_artifacts_abs_paths)
+            self.display_artifacts(answer.user_artifacts_paths)
         else:
             print(final_message.content)
 

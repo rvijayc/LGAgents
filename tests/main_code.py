@@ -1,17 +1,17 @@
-import os, sys
+import os
 import urllib.request
 import tempfile
 
 import IPython
 
 from langchain.chat_models import init_chat_model
-from lg_agents import SQLiteAgentPolicy, DockerConfig, SQLAgent, DockerRunner
+from lg_agents import SQLiteAgentPolicy, SQLAgent
 
 CHINOOK_DATABASE_HINTS="""
 Here are some additional hints about tables and columns the database.
 
 Table InvoiceLine:
-    - Column UnitPrice is in US dollar units.
+    - Column UnitPrice is in millions of US dollar units.
 
 """
 class ChinookSQLitePolicy(SQLiteAgentPolicy):
@@ -30,19 +30,17 @@ class ChinookSQLitePolicy(SQLiteAgentPolicy):
 def main():
     
     model = init_chat_model('openai:gpt-4.1')
-    # default Docker configuration (included inside lg_agents).
-    dc = DockerConfig()
     # start the runner using a context manager (to allow graceful shutdown).
-    with DockerRunner(dc), tempfile.TemporaryDirectory() as tempdir:
+    with tempfile.TemporaryDirectory() as tempdir:
         policy = ChinookSQLitePolicy()
         agent = SQLAgent(
+                agentrun_url='http://localhost:8000',
                 agent_policy=policy, 
-                docker_config=dc, 
                 tmpdir=tempdir,
                 show_artifacts=True,
                 model=model
         )
-        agent.chat('Which artists have the most revenue?', quiet=False)
+        agent.chat('Generate a histogram of artists sorted by revenue for the first 15 artists', quiet=False)
         IPython.embed()
 
 if __name__ == "__main__":
