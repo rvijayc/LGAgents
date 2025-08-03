@@ -14,6 +14,6 @@ pytest
 pytest-benchmark
 pyyaml
 tqdm
-agentrun_plus>=0.2.14
+agentrun_plus>=0.2.19
 build
 twine

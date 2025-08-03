@@ -28,7 +28,6 @@ class ChinookSQLitePolicy(SQLiteAgentPolicy):
         return CHINOOK_DATABASE_HINTS
 
 def main():
-    
     model = init_chat_model('openai:gpt-4.1')
     # start the runner using a context manager (to allow graceful shutdown).
     with tempfile.TemporaryDirectory() as tempdir:
