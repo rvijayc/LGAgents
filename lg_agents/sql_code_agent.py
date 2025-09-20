@@ -164,7 +164,7 @@ class AnswerSchema(BaseModel):
     The answer to the user's question in markdown format. Include links to artifacts as appropriate.
     """)
     user_artifacts_paths: List[str] = Field(description="""
-    Local paths of artifacts (if any) produced as a part of the user's answer.
+    **Local** paths of artifacts (if any) produced as a part of the user's answer. This should be the same as the `user_artifacts_path` returned by the `run_python_tool` and contains the user accessible paths of the produced artifacts.
     """)
 
 REACT_SYSTEM_PROMPT ="""
@@ -366,6 +366,9 @@ class SQLAgent:
         # latch parameters.
         self.recursion_limit = recursion_limit
 
+        # initialize thread index.
+        self.thread_idx = 1
+
         # initialize LLM.
         if isinstance(model, str):
             self.llm = init_chat_model(model)
@@ -490,12 +493,16 @@ class SQLAgent:
         self.config = {
                 'recursion_limit': self.recursion_limit,
                 'configurable': {
-                    'thread_id': 1,
+                    'thread_id': self.thread_idx,
                     'config_idx': self.config_idx
                 }
         }
 
-    def chat(self, question:str, quiet=True):
+    def chat(self, question:str, quiet=True, new=False):
+
+        if new:
+            self.thread_idx += 1
+            self._init_config()
 
         gen = self.agent.stream(
             {"messages": [HumanMessage(question)]}, 

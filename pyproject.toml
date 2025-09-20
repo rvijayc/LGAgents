@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lg_agents"
-version = "0.0.10"
+version = "0.0.11"
 description = "A Toolkit for building SQL Agents that use Python to interact with a SQL database."
 authors = [
     {name = "Vijay Ramasami", email = "rvijayc@gmail.com"}
@@ -16,9 +16,12 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "langchain>=0.3.25",
-    "langchain-openai>=0.3.16",
-    "langgraph>=0.4.3",
+    "langchain==0.3.26",
+    "langchain-openai==0.3.16",
+    "langgraph==0.4.3",
+    "langgraph-checkpoint==2.1.0",
+    "langgraph-prebuilt==0.5.2",
+    "langgraph-sdk==0.1.72",
     "IPython",
     "matplotlib",
     "docker",
@@ -26,7 +29,7 @@ dependencies = [
     "uuid",
     "loguru",
     "pyyaml",
-    "agentrun_plus>=0.2.15",
+    "agentrun_plus>=0.2.21",
     "tqdm"
 ]
 license = {text = "MIT"}
