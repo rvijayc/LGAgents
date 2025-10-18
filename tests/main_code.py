@@ -39,7 +39,8 @@ def main():
                 show_artifacts=True,
                 model=model
         )
-        agent.chat('Generate a histogram of artists sorted by revenue for the first 15 artists', quiet=False)
+        # agent.chat('Generate a histogram of artists sorted by revenue for the first 15 artists', quiet=False)
+        answer = agent.chat('Which genre has the most artists?', new=True)
         IPython.embed()
 
 if __name__ == "__main__":

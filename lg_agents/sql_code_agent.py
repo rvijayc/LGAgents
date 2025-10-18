@@ -1,10 +1,11 @@
 import os
 import pdb
 import tempfile
-from typing import Literal, TypedDict, List, Optional
+from typing import Literal, TypedDict, List, Optional, Any
 from uuid import uuid4
 import abc
 from dataclasses import dataclass
+import json
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
@@ -13,7 +14,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.checkpoint.memory import MemorySaver 
 from langchain_core.runnables.graph_png import PngDrawer
 from langchain_core.language_models import BaseChatModel
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from langchain.output_parsers import PydanticOutputParser
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
@@ -163,9 +164,23 @@ class AnswerSchema(BaseModel):
     message: str = Field(description="""
     The answer to the user's question in markdown format. Include links to artifacts as appropriate.
     """)
+    json_data: Optional[Any] = Field(
+            default=None,
+            description="JSON outputs (if appropriate)"
+    )
     user_artifacts_paths: List[str] = Field(description="""
     **Local** paths of artifacts (if any) produced as a part of the user's answer. This should be the same as the `user_artifacts_path` returned by the `run_python_tool` and contains the user accessible paths of the produced artifacts.
     """)
+
+    @field_validator("json_data", mode="before")
+    @classmethod
+    def parse_json_output(cls, value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                raise ValueError(f"Invalid JSON string for json_output {value}")
+        return value
 
 REACT_SYSTEM_PROMPT ="""
 You are an agent designed to interact with a SQL database. You'll do so by
@@ -517,12 +532,13 @@ class SQLAgent:
         print('================================== Final Answer ================================== ')
         final_state = self.agent.get_state(self.config) # pyright: ignore[reportArgumentType]
         final_message = final_state.values['messages'][-1]
+        answer: AnswerSchema = AnswerSchema.model_validate_json(final_message.content)
         if self.show_artifacts:
-            answer: AnswerSchema = AnswerSchema.model_validate_json(final_message.content)
             print(answer.message)
             self.display_artifacts(answer.user_artifacts_paths)
         else:
             print(final_message.content)
+        return answer
 
 @dataclass
 class SQLAgentGlobals:
