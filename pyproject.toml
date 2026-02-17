@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lg_agents"
-version = "0.0.14"
+version = "0.0.15"
 description = "A Toolkit for building SQL Agents that use Python to interact with a SQL database."
 authors = [
     {name = "Vijay Ramasami", email = "rvijayc@gmail.com"}
@@ -29,7 +29,7 @@ dependencies = [
     "uuid",
     "loguru",
     "pyyaml",
-    "agentrun_plus>=0.2.21",
+    "agentrun_plus>=0.4.0",
     "tqdm"
 ]
 license = {text = "MIT"}

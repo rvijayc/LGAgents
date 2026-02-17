@@ -14,7 +14,7 @@ from langchain_core.tools import BaseTool, ArgsSchema, BaseToolkit
 from loguru import logger
 
 from agentrun_plus import (
-        AgentRunAPIClient, SessionInfo
+        AgentRunMCPClient, SessionInfo
 )
 
 class PythonToolInput(BaseModel):
@@ -114,7 +114,7 @@ class PythonRunnerToolContext():
         """
         # latch parameters.
         self.debug = debug
-        self.client: AgentRunAPIClient = AgentRunAPIClient(base_url=agentrun_url)
+        self.client: AgentRunMCPClient = AgentRunMCPClient(base_url=agentrun_url)
         self.ignore_dependencies = ignore_dependencies
         self.ignore_unsafe_functions = ignore_unsafe_functions
         self.tmpdir = tmpdir
@@ -176,24 +176,13 @@ class PythonRunnerToolContext():
             self,
             fmt="markdown"
     ) -> str:
-        lines = [
-            "sqlalchemy",
-            "numpy", 
-            "pandas", 
-            "matplotlib", 
-            "seaborn", 
-            "scikit-learn", 
-            "statsmodels",
-            "geopandas",
-            "squarify",
-            "tabulate",
-            "prettytable"
-        ]
+        result = self.client.get_packages()
+        lines = result["packages"]
         match fmt:
             case 'markdown':
                 lines = [ f'  - {line.rstrip()}' for line in lines ]
                 return '\n'.join(lines)
-            case _: 
+            case _:
                 raise RuntimeError(f'Unknown format: {format}!')
 
     def copy_file_from_container(
